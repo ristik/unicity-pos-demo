@@ -18,6 +18,7 @@ import { loadOrCreate, parseBackup, replaceKey, toMnemonic } from './keys.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 
 import { load, loadJson, PROFILE, remove, save, saveJson } from './store.js';
+import { CONFIRM_WORD, confirmed, valueAtRisk } from './importguard.js';
 import { getToken, listTokens, patchToken, putToken, type Phase, type TokenRecord } from './tokens.js';
 import { begin, end, fact, installFetchTrace, type Trace } from './trace.js';
 import { bootstrapTrust, entries, refreshTrust } from './trust.js';
@@ -96,6 +97,14 @@ async function idbOp(op: 'put' | 'delete' | 'get', p?: bridge.PendingLock): Prom
     console.warn('pending lock: IndexedDB copy unavailable', e);
     return null;
   }
+}
+
+/** The current key's balance and vault credit, read fresh; null for what cannot be read (no connection, an RPC error). */
+async function readHoldings(): Promise<{ balance: bigint | null; credit: bigint | null }> {
+  if (!session) return { balance: null, credit: null };
+  const s = session;
+  const [b, c] = await Promise.all([s.evm.balance(me.evmAddress).catch(() => null), bridge.claimable(s, me.evmAddress).catch(() => null)]);
+  return { balance: b, credit: c };
 }
 
 /** What is bound to the current key and not finished: a pending lock (either copy), locks not minted yet, pending transfers and burns. */
@@ -537,6 +546,17 @@ function identityCard(): HTMLElement {
                 + 'Finish it first (or discard a refused transfer or burn). Export the current key (shown below) before you replace it.');
               return;
             }
+            // value only the old key can use: show the key and ask for a typed confirmation
+            const atRisk = valueAtRisk({ address: me.evmAddress, ...(await readHoldings()), tokens: listTokens() });
+            if (atRisk.length) {
+              showBackup();
+              const typed = prompt(`The current key still has:\n\n- ${atRisk.join('\n- ')}\n\nReplacing it deletes the only stored copy of its secret. `
+                + `Save the current key first (shown on the page under Identity).\n\nType "${CONFIRM_WORD}" to replace it anyway.`);
+              if (!confirmed(typed)) {
+                alert('Not replaced: the current key is kept.');
+                return;
+              }
+            }
             me = replaceKey(secret);
             location.reload();
           } catch (e) {
@@ -551,20 +571,40 @@ function identityCard(): HTMLElement {
     backup);
 }
 
-/** A plain value transfer, so the other tab can pay gas for its own redeem and claim. */
+/**
+ * A plain value transfer, so the other tab can pay gas for its own redeem and claim. The sent tx is stored until its receipt is read: while
+ * it is, the button polls that transaction instead of sending another.
+ */
 function fundPeer(): HTMLElement | string {
   const p = [...peers.values()][0];
-  if (!p || !session) return '';
+  const pending = loadJson<{ hash: string; to: string } | null>('fund.pending', null);
+  if ((!p && !pending) || !session) return '';
   return h('button', {
     class: 'link', disabled: !!busy, onclick: () => void step('fund', async () => {
       const s = sess();
-      const sent = await s.evm.send(me.secret, { to: p.evmAddress, value: 10n ** 15n, gas: 21_000n });
-      fact('tx', sent.hash);
-      await s.evm.waitReceipt(sent.hash);
+      let hash = pending?.hash;
+      let to = pending?.to ?? p!.profile;
+      if (hash) {
+        fact('resuming', `the gas transfer ${hash} to tab ${to.toUpperCase()}: not sending another`);
+      } else {
+        const signed = await s.evm.sign(me.secret, { to: p!.evmAddress, value: 10n ** 15n, gas: 21_000n });
+        saveJson('fund.pending', { hash: signed.hash, to: (to = p!.profile) });
+        hash = signed.hash;
+        fact('tx', hash);
+        try {
+          await s.evm.broadcast(signed.raw);
+        } catch (e) {
+          // a refusal of a tx the chain has not seen: nothing was sent
+          if (bridge.isRefusal(e) && !(await s.evm.receipt(hash))) remove('fund.pending');
+          throw e;
+        }
+      }
+      const rc = await s.evm.waitReceipt(hash);
+      remove('fund.pending');
       await refreshBalances();
-      return `sent 0.001 UCT to tab ${p.profile.toUpperCase()}`;
+      return `${rc.status === '0x1' ? 'sent' : 'reverted:'} 0.001 UCT to tab ${to.toUpperCase()}`;
     }),
-  }, `send 0.001 UCT gas to tab ${p.profile.toUpperCase()}`);
+  }, pending ? `check the pending gas transfer to tab ${pending.to.toUpperCase()}` : `send 0.001 UCT gas to tab ${p!.profile.toUpperCase()}`);
 }
 
 /** Built once: re-attaching the hCaptcha iframe would reload it. Only its controls are re-rendered. */
