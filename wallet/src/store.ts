@@ -13,6 +13,8 @@ export const PROFILE = profile().replace(/[^a-z0-9]/gi, '').slice(0, 8) || 'a';
 const key = (k: string): string => `unicity-demo.${PROFILE}.${k}`;
 
 let warned = false;
+/** What could not be written to storage: this page still reads it back until it is closed. */
+const memory = new Map<string, string>();
 function storage(): Storage | null {
   try {
     return globalThis.localStorage ?? null;
@@ -22,6 +24,7 @@ function storage(): Storage | null {
 }
 
 export function load(k: string): string | null {
+  if (memory.has(key(k))) return memory.get(key(k))!;
   try {
     return storage()?.getItem(key(k)) ?? null;
   } catch {
@@ -34,8 +37,10 @@ export function save(k: string, v: string): boolean {
     const s = storage();
     if (!s) throw new Error('no storage');
     s.setItem(key(k), v);
+    memory.delete(key(k));
     return true;
   } catch (e) {
+    memory.set(key(k), v);
     if (!warned) console.warn(`storage unavailable, ${k} is kept in memory only`, e);
     warned = true;
     return false;
@@ -43,6 +48,7 @@ export function save(k: string, v: string): boolean {
 }
 
 export function remove(k: string): void {
+  memory.delete(key(k));
   try {
     storage()?.removeItem(key(k));
   } catch {

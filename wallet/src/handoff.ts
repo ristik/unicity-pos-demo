@@ -5,6 +5,7 @@
 import type { NativeBridge, VerifiedToken } from '@unicitylabs/native-bridge-plugin';
 import { Token } from '@unicitylabs/state-transition-sdk/lib/transaction/Token.js';
 
+import { isAddress } from './evm.js';
 import { eqBytes, hex, unhex } from './hex.js';
 import { predicateOf } from './keys.js';
 
@@ -12,6 +13,31 @@ export type Message =
   | { type: 'hello'; from: string; publicKey: string; evmAddress: string }
   | { type: 'who'; from: string }
   | { type: 'token'; from: string; to: string; bytes: string; amountWei: string };
+
+/** Largest token file accepted over the channel (hex characters): a token is a few KB; this only bounds what a stray tab can make us store. */
+export const MAX_TOKEN_HEX = 2_000_000;
+
+const isProfile = (v: unknown): v is string => typeof v === 'string' && /^[a-z0-9]{1,8}$/i.test(v);
+const isHex = (v: unknown, chars?: number): v is string =>
+  typeof v === 'string' && v.length % 2 === 0 && /^[0-9a-f]*$/i.test(v) && (chars === undefined ? v.length > 0 && v.length <= MAX_TOKEN_HEX : v.length === chars);
+
+/** A channel message with every field of the right type, or null: anything another tab posts is untrusted input. */
+export function parseMessage(d: unknown): Message | null {
+  if (typeof d !== 'object' || d === null) return null;
+  const m = d as Record<string, unknown>;
+  if (!isProfile(m.from)) return null;
+  switch (m.type) {
+    case 'who':
+      return { type: 'who', from: m.from };
+    case 'hello':
+      return isHex(m.publicKey, 66) && isAddress(m.evmAddress) ? { type: 'hello', from: m.from, publicKey: m.publicKey, evmAddress: m.evmAddress } : null;
+    case 'token':
+      return isProfile(m.to) && isHex(m.bytes) && typeof m.amountWei === 'string' && /^\d{1,40}$/.test(m.amountWei)
+        ? { type: 'token', from: m.from, to: m.to, bytes: m.bytes, amountWei: m.amountWei } : null;
+    default:
+      return null;
+  }
+}
 
 export interface Peer { profile: string; publicKey: string; evmAddress: string }
 
@@ -24,7 +50,13 @@ export class Handoff {
     token?: (m: Extract<Message, { type: 'token' }>) => void;
   }) {
     this.ch = typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel('unicity-demo-handoff');
-    if (this.ch) this.ch.onmessage = (e: MessageEvent<Message>) => this.receive(e.data);
+    if (this.ch) {
+      this.ch.onmessage = (e: MessageEvent<unknown>) => {
+        const m = parseMessage(e.data);
+        if (m) this.receive(m);
+        else console.warn('handoff: ignored a malformed message', e.data);
+      };
+    }
     this.post({ type: 'who', from: profile });
     this.hello();
   }
