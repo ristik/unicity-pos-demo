@@ -132,7 +132,7 @@ Forks keep `main` as the upstream-sync branch. UTB v2 is being upstreamed: bft-g
 | mint / transfer / burn | aggregator `submitCertificationRequest`, `getInclusionProof` |
 | trust | `getTrustBasePage` → local `TrustBaseHistory`, refreshed on `ErrNoEntryForEpoch` |
 | return proof | aggregator consolidation: the burned token's proofs under **one** seal |
-| redeem / claim | `BridgeVault.redeem(bytes)` → precompile `0x0105`; then `claim` |
+| redeem / claim | `BridgeVault.redeem(bytes)` → precompile `0x0105`; then `claim(uint256,address)` |
 | PoS view | `eth_call` views only: `StakeCustody`, `ElectionPolicy`, `SealRegistry` record log |
 
 The public `/rpc` is allow-listed: no `eth_getLogs`, no `eth_getProof`, no batches. The visualizer rebuilds history from the registry record log.
