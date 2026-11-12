@@ -70,3 +70,25 @@ The ports on the server depend on the generation, so check its compose file. `BR
 
 hCaptcha accepts only hostnames registered for the site key, so the faucet widget does not work on localhost. For local runs, fund the burner
 address another way, for example a transfer from an operator account done on the server.
+
+## End-to-end run in headless Chromium
+
+`e2e/drive.mjs` drives the page over the DevTools protocol. It has no dependencies and needs Node 22 or later. Each argument is `<tab>:<command>`, where the tab is a wallet profile (`a`, `b`). The file header lists the commands.
+
+```sh
+# 1. tunnels to the server's loopback ports (see above) and a local copy of the generation's bridge/public/
+ssh -f -N -L 18545:127.0.0.1:8545 -L 18088:127.0.0.1:8088 -L 18090:127.0.0.1:8090 <server>
+# 2. build with the generation's trust pin (its manifest's utb.genesis_id), serve it with the dev routes
+VITE_TRUST_PIN=<genesis entry id> npm run build
+BRIDGE_DIR=./bridge-public npx vite preview --port 4173 &
+# 3. print tab A's address, then fund it (below)
+node e2e/drive.mjs http://localhost:4173/demo/ a:connect a:addr
+# 4. the flow: A locks and mints, hands the token to B and funds B's gas; B burns, redeems and claims
+node e2e/drive.mjs http://localhost:4173/demo/ a:connect a:step:lock a:step:lockproof a:step:mint \
+  a:check:verify a:check:unknown a:check:relabel b:connect a:wait:2 a:step:transfer b:wait:3 b:received a:fund
+node e2e/drive.mjs http://localhost:4173/demo/ b:connect b:step:burn b:step:returnproof b:step:redeem b:step:claim
+```
+
+The browser profile, and with it the tabs' keys and tokens, lives in `PROFILE_DIR` (default: `unicity-demo-e2e-profile` in the OS temp directory). Successive runs therefore continue the same wallets. Delete the directory to start with new keys. Set `CHROME` if Chromium is not at the macOS default path. The exit status is 1 if a step failed.
+
+**Funding is manual.** The faucet's hCaptcha rejects localhost. Instead, send tab A some UCT (about 0.01 is enough for a 0.001 round trip) from a funded account on the server, signing on the server so the key never leaves it. One way is a value transfer signed with `signLegacyTx` from `src/evm.ts`, run with node on the host against `127.0.0.1:8545` with an `X-Forwarded-For` header. Tab B gets its gas from tab A through `a:fund`.
