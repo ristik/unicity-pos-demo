@@ -460,10 +460,11 @@ function header(): HTMLElement {
     h('span', { class: 'muted' }, session ? `chain ${session.cfg.chainId} · trust epoch ${trust?.history.tip?.epoch}` : trust ? `trust epoch ${trust.history.tip?.epoch} · no bridge` : 'not connected'),
     h('button', { class: 'link', disabled: !!busy, onclick: () => void step('connect', connect) }, 'reconnect'),
     st && !st.ok ? h('span', { class: 'msg bad' }, st.text) : '',
-    h('details', { class: 'inline' }, h('summary', {}, 'explain'), explain(traces.get('connect'))));
+    h('details', { class: 'inline' }, h('summary', {}, 'explain'), explain(traces.get('connect'))),
+    h('a', { href: './pos.html' }, 'PoS visualizer'));
 }
 
-const slots = { header: h('div'), identity: h('div'), trust: h('div'), flow: h('div'), check: h('div') };
+const slots = { header: h('div'), identity: h('div'), trust: h('div'), flow: h('div'), check: h('div', { id: 'check' }) };
 root.replaceChildren(slots.header, h('main', {},
   h('div', { class: 'col' }, slots.identity, faucetCard, slots.trust),
   h('div', { class: 'col wide' }, slots.flow, slots.check, settingsCard())));
