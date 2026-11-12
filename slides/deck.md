@@ -26,7 +26,7 @@ Live demo on `pos.staging.unicity.network`
 ## What we'll show
 
 1. **The setup**: what runs on the staging network, its endpoints and repos.
-2. **Assets demo**: UCT from the faucet → bridged to a Unicity token → sent to a phone → bridged back.
+2. **Assets demo**: UCT from the faucet → bridged to a Unicity token → sent to a second wallet (another tab) → bridged back.
 3. **PoS demo**: committee, stakes and quorum, live. Then this laptop **joins as a validator**, an old validator **retires**, and an old token **still verifies**.
 4. **How it works underneath**: contracts, logical validator, bridge vs bridging to an external chain.
 
@@ -117,7 +117,7 @@ Not public: root/shard admin, authority, Engine API, Prometheus.
 | `ristik/bft-go-base` | shared Go types, trust-base codecs | `integration/enshrined-evm` |
 | `ristik/unicity-pos-demo` | this wallet, visualizer and slides | `main` |
 
-Forks keep `main` as the upstream-sync branch. UTB v2 is being upstreamed: bft-go-base, unicity-ids and Java are merged; JS #206 and Rust #73 merged 2026-11-11.
+Forks keep `main` as the upstream-sync branch. UTB v2 is being upstreamed: bft-go-base, unicity-ids and Java are merged; aggregator-go #273, JS #206, Rust #73 and Java #101 merged 2026-11-11.
 
 ---
 
@@ -126,7 +126,7 @@ Forks keep `main` as the upstream-sync branch. UTB v2 is being upstreamed: bft-g
 | Step | Call |
 |---|---|
 | fund | faucet `POST /api/claim` {address, hCaptcha token}; `GET /api/network` |
-| EVM reads/writes | `/rpc`: `eth_call`, `eth_estimateGas`, `eth_sendRawTransaction`, `eth_getTransactionReceipt`, `eth_getBalance`, `eth_getBlockByNumber` |
+| EVM reads/writes | `/rpc`: `eth_call`, `eth_estimateGas`, `eth_sendRawTransaction`, `eth_getTransactionReceipt`, `eth_getTransactionCount`, `eth_gasPrice`, `eth_getBalance`, `eth_getBlockByNumber`, `eth_getCode` |
 | lock | `BridgeVault.lock(bytes)` |
 | lock proof | `GET /lockproof/v1/lockproof?block=&nonce=` (EVM UC + header + MPT proof; built server-side) |
 | mint / transfer / burn | aggregator `submitCertificationRequest`, `getInclusionProof` |
@@ -243,7 +243,7 @@ Keys stay in the laptop's memory: sleep the laptop or restart colima and that va
 5. **Redeem**: anyone submits the history + UCs. `0x0105` verifies it natively and the vault credits the recipient.
 6. **Claim**: pull payment. Invariant `paid ≤ credited ≤ locked`.
 
-The receiver verifies **offline**: the token + local UTB history, no RPC.
+The receiver verifies **locally**: the token + its UTB history. No EVM RPC; the only fetch is newer trust-base entries, each checked against its predecessor.
 
 ---
 
@@ -331,7 +331,7 @@ Lesson: the roots and aggregator stayed healthy the whole time. The weak spot wa
 - Diagnostics: consensus-loop profile, resource collector, pending-work view.
 
 **Protocol and format, of general use**
-- **Trust Base v2**: signed trust-base history with weighted quorum; `/api/v1/trustbases`; SDK 4.0 in JS/Rust/Java. **Merged upstream 2026-11-08.**
+- **Trust Base v2**: signed trust-base history with weighted quorum; `/api/v1/trustbases`; SDK 4.0 in JS/Rust/Java. **Merged upstream 2026-11-09 to 11-11** (bft-go-base#20; aggregator-go#273, sdk-js#206, sdk-rust#73, sdk-java#101).
 - **UC consolidation** and **non-inclusion proofs**, across all repos. Merged upstream.
 - Strict recoverable secp256k1 verification (recovery ID bound to the key) in Go and all SDKs.
 - Native bounds raised to 256 members / 256 signatures. Roots re-verify RSMT consistency before voting (#547).
@@ -348,7 +348,7 @@ Lesson: the roots and aggregator stayed healthy the whole time. The weak spot wa
 
 # Demo 1: assets
 
-faucet → lock → mint → send to a phone → burn → redeem → claim
+faucet → lock → mint → send to tab B → burn → redeem → claim
 
 ---
 
