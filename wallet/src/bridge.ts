@@ -79,6 +79,8 @@ export const amountBytes = (wei: bigint): Uint8Array => {
 export type Certifier = Pick<AggregatorClient, 'submitCertificationRequest' | 'getInclusionProof'>;
 
 /** The state is certified, but for another transaction: this one can never be certified. Not retryable. */
+const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
 export class ConflictError extends Error {
   constructor(message: string) {
     super(message);
@@ -142,30 +144,68 @@ export interface PendingLockStore { get(): PendingLock | null; put(p: PendingLoc
 export type LockEvm = Pick<Evm, 'sign' | 'broadcast' | 'receipt' | 'waitReceipt' | 'rpc'>;
 
 /**
+ * A JSON-RPC error that is the node refusing the transaction itself (it can never be mined as signed). Everything else is ambiguous: an
+ * upstream timeout or 5xx the gateway wraps in a JSON-RPC error, "nonce too low" (it may have just been mined), "already known".
+ */
+export const isRefusal = (e: unknown): boolean =>
+  e instanceof RpcError && !alreadyKnown(e.message) && !/nonce too low|timeout|timed out|deadline|upstream|gateway|unavailable|temporar|busy|overload|\b5\d\d\b|connect|reset|eof/i.test(e.message)
+  && /insufficient funds|underpriced|intrinsic gas|gas limit|exceeds block gas|invalid (sender|signature|chain|transaction)|chain ?id|nonce too high|fee cap|max fee|tip higher|oversized|rlp/i.test(e.message);
+
+/** Thrown when a lock's fate is not known yet: it stays pending, and the next Run polls it again. */
+export class StillPendingError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'StillPendingError';
+  }
+}
+
+/**
  * BridgeVault.lock(bytes p0) payable: p0 is the owner predicate the token will be minted to. The nonce is in the receipt's Locked log.
  * The signed transaction is stored before it is broadcast. While one is stored, a call resumes it (rebroadcasts the same bytes and polls
- * its hash) and ignores `amountWei`: a second lock is never sent while one is pending. The store is cleared once the receipt is read, or when
- * the transaction can no longer be mined (refused by the node, or its account nonce taken by another transaction).
+ * its hash) and ignores `amountWei`: a second lock is never sent while one is pending. The store is cleared only when the outcome is known:
+ * a receipt, or proof that it can never be mined (its account nonce went to another transaction, or the node refused it outright while the
+ * nonce had not moved). When in doubt it stays pending.
  */
 export async function lock(s: { evm: LockEvm; cfg: Pick<TesterConfig, 'vault'> }, me: Burner, amountWei: bigint, store: PendingLockStore, opts: { timeoutMs?: number } = {}): Promise<Lock & { resumed: boolean }> {
   let p = store.get();
   const resumed = !!p;
+  /** What the chain says now: mined (receipt), replaced (nonce used, no receipt), or open (neither). */
+  const settle = async (q: PendingLock): Promise<'mined' | 'replaced' | 'open'> => {
+    if (await s.evm.receipt(q.hash)) return 'mined';
+    const used = BigInt(await s.evm.rpc<string>('eth_getTransactionCount', [me.evmAddress, 'latest']));
+    // the receipt again: the transaction may be mined between the two reads
+    if (await s.evm.receipt(q.hash)) return 'mined';
+    return used > BigInt(q.txNonce) ? 'replaced' : 'open';
+  };
+  const replaced = (q: PendingLock): never => {
+    store.clear();
+    throw new Error(`the pending lock ${q.hash} was not mined and its account nonce ${q.txNonce} is used by another transaction: nothing was locked by it, Run locks again`);
+  };
+  /** A broadcast failed: decide from the chain, not from the error. Clear only on a refusal of a transaction that is provably not mined. */
+  const afterError = async (q: PendingLock, e: unknown): Promise<void> => {
+    let state: Awaited<ReturnType<typeof settle>>;
+    try {
+      state = await settle(q);
+    } catch {
+      throw new StillPendingError(`the lock ${q.hash} may have been sent (${errText(e)}), and its state cannot be read now: it stays pending, Run again later`);
+    }
+    if (state === 'mined') return;
+    if (state === 'replaced') replaced(q);
+    if (isRefusal(e)) {
+      store.clear();
+      throw new Error(`the node refuses the lock ${q.hash} (${errText(e)}) and it is not mined: nothing was locked; Run locks again`);
+    }
+    throw new StillPendingError(`the lock ${q.hash} is not mined yet and the send was not conclusive (${errText(e)}): it stays pending, Run again later`);
+  };
   if (p) {
     fact('resuming the pending lock', `${p.hash} (${p.amountWei} wei, signed ${new Date(p.at).toISOString()})`);
-    if (!(await s.evm.receipt(p.hash))) {
-      const used = BigInt(await s.evm.rpc<string>('eth_getTransactionCount', [me.evmAddress, 'latest']));
-      if (used > BigInt(p.txNonce) && !(await s.evm.receipt(p.hash))) {
-        store.clear();
-        throw new Error(`the pending lock ${p.hash} was not mined and its account nonce ${p.txNonce} is used by another transaction: nothing was locked by it, Run locks again`);
-      }
+    const state = await settle(p);
+    if (state === 'replaced') replaced(p);
+    if (state === 'open') {
       try {
         await s.evm.broadcast(p.raw);
       } catch (e) {
-        if (e instanceof RpcError) {
-          store.clear();
-          throw new Error(`the node refuses the pending lock ${p.hash} (${e.message}): it was not locked; Run locks again`);
-        }
-        throw e;
+        await afterError(p, e);
       }
     }
   } else {
@@ -180,9 +220,7 @@ export async function lock(s: { evm: LockEvm; cfg: Pick<TesterConfig, 'vault'> }
     try {
       await s.evm.broadcast(signed.raw);
     } catch (e) {
-      // a JSON-RPC error is the node's refusal: nothing is pending. Anything else (network, HTTP) may have reached it: keep it to poll
-      if (e instanceof RpcError && !alreadyKnown(e.message)) store.clear();
-      throw e;
+      await afterError(p, e);
     }
   }
   const rc = await s.evm.waitReceipt(p.hash, opts.timeoutMs);
@@ -240,6 +278,17 @@ export async function mint(s: Session, me: Burner, l: Lock, lockProof: Uint8Arra
  * It is stored on the token record before it is submitted; a retry or a reload certifies this same request and never builds another.
  */
 export type PendingTx = NonNullable<TokenRecord['pending']>;
+
+/**
+ * Before a stored transfer or burn is discarded: is its state certified, and for which transaction? 'none' (no proof: safe to discard and
+ * build another), 'ours' (certified: Run finishes it, never discard), 'other' (spent by another transaction).
+ */
+export async function probePending(agg: Certifier, p: PendingTx): Promise<'none' | 'ours' | 'other'> {
+  const cd = CertificationData.fromCBOR(unhex(p.cd));
+  const proof = (await agg.getInclusionProof(await StateId.fromCertificationData(cd))).inclusionProof;
+  if (!proof) return 'none';
+  return proofIsFor(proof, cd) ? 'ours' : 'other';
+}
 
 /** Certify the stored transaction, or build, store (`persist`) and certify a new one; the token file grows by [tx, proof]. */
 async function spend(agg: Certifier, me: Burner, bytes: Uint8Array, pending: PendingTx | undefined, kind: PendingTx['kind'],

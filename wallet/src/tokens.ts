@@ -33,6 +33,8 @@ export interface TokenRecord {
    * certification request). While it is set, the step resumes this transaction and never builds another.
    */
   pending?: { kind: 'transfer' | 'burn'; tx: string; cd: string; at: number; toPublicKey?: string; recipient?: string };
+  /** pending transactions the user discarded (after a probe found no proof for them), kept for the record */
+  discarded?: (NonNullable<TokenRecord['pending']> & { discardedAt: number; why: string })[];
 }
 
 export const listTokens = (): TokenRecord[] => loadJson<TokenRecord[]>('tokens', []);

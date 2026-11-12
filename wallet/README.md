@@ -53,10 +53,14 @@ The page checks that the RPC's block 0 is the `genesisHash` in tester-config.jso
 Each step can be run again, or the page reloaded part way through, without losing the lock or the token:
 
 - **Lock:** the signed transaction is stored before `eth_sendRawTransaction`. While it is stored, *Run* polls its hash (rebroadcasting the
-  same bytes when it is not mined) and does not send another lock. It is cleared once the receipt is read, or when it can no longer be mined
-  (the node refused it, or its account nonce went to another transaction).
+  same bytes when it is not mined) and does not send another lock. After any send error the chain decides, not the error: the receipt and
+  the account nonce are read again. The lock is cleared only once its receipt is read, or when it provably cannot be mined (its account
+  nonce went to another transaction, or the node refused it outright while the nonce had not moved). A gateway timeout, a wrapped 5xx or
+  "nonce too low" keeps it pending ("still pending, Run again later").
 - **Transfer and burn:** the transaction (with its random state mask) and its signed certification request are stored on the token record
-  before they are submitted. A retry submits that same request, and never builds a new one.
+  before they are submitted. A retry submits that same request, and never builds a new one. If the aggregator refuses it outright, *discard
+  pending* (with a confirmation) drops it so the token can be spent again. It first checks the aggregator: a request that is certified is
+  never discarded. The dropped request stays on the record (`discarded`).
 - **Certification:** an existing proof is taken without submitting again. *Already submitted* counts as accepted. A refusal fails with its
   status. A proof that certifies another transaction for the state is an error, and is never stored as this transaction's proof.
 - **Redeem:** when the vault answers `PartAlreadyRedeemed` (an earlier redeem was mined), the step reports *already redeemed*.

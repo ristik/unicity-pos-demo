@@ -14,8 +14,8 @@ import type { InclusionProof } from '@unicitylabs/state-transition-sdk/lib/api/I
 import { StateId } from '@unicitylabs/state-transition-sdk/lib/api/StateId.js';
 import { Token } from '@unicitylabs/state-transition-sdk/lib/transaction/Token.js';
 
-import { burn, certify, ConflictError, lock, transfer, type LockEvm, type PendingLock, type PendingTx } from '../src/bridge.js';
-import { calldata, encBytes, LOCKED_TOPIC, RpcError, type Receipt } from '../src/evm.js';
+import { burn, certify, ConflictError, lock, probePending, StillPendingError, transfer, type LockEvm, type PendingLock, type PendingTx } from '../src/bridge.js';
+import { calldata, encBytes, HttpError, LOCKED_TOPIC, RpcError, type Receipt } from '../src/evm.js';
 import { parseMessage } from '../src/handoff.js';
 import { hex, unhex } from '../src/hex.js';
 import { burnerFrom } from '../src/keys.js';
@@ -143,7 +143,7 @@ test('burn: the stored burn is resumed; a pending transfer blocks a burn', async
 const VAULT = `0x${'aa'.repeat(20)}`;
 
 /** A fake EVM: it signs deterministic fake transactions, counts broadcasts, and mines on demand. */
-function fakeEvm(me: ReturnType<typeof burnerOf>, o: { refuse?: string; mineOnBroadcast?: number; lockNonce?: bigint } = {}) {
+function fakeEvm(me: ReturnType<typeof burnerOf>, o: { refuse?: string; mineOnBroadcast?: number; lockNonce?: bigint; fail?: (n: number) => Error | undefined } = {}) {
   let signed = 0;
   let accountNonce = 0n;
   const broadcasts: string[] = [];
@@ -160,6 +160,8 @@ function fakeEvm(me: ReturnType<typeof burnerOf>, o: { refuse?: string; mineOnBr
       broadcasts.push(raw);
       if (broadcasts.length === o.mineOnBroadcast) evm.mineNow(`0x${hex(sha256(Uint8Array.of(Number(BigInt(`0x${raw.slice(4)}`)))))}`);
       if (o.refuse) throw new RpcError(`eth_sendRawTransaction: ${o.refuse}`);
+      const e = o.fail?.(broadcasts.length);
+      if (e) throw e;
     },
     async receipt(hash) {
       return mined.get(hash) ?? null;
@@ -243,6 +245,48 @@ test('lock: the pending lock is dropped when its account nonce is taken by anoth
   const k = fakeEvm(me, { refuse: 'already known' });
   await assert.rejects(lock({ evm: k.evm, cfg: { vault: VAULT } }, me, 1000n, store, { timeoutMs: 10 }));
   assert.ok(store.get());
+});
+
+test('lock: mined just before the rebroadcast ("nonce too low"): the lock is kept and finished, never forgotten', async () => {
+  const me = burnerOf(2);
+  // broadcast 1: accepted, not mined in time; broadcast 2 (the resume): the transaction is mined first, the node answers nonce too low
+  const f = fakeEvm(me, { mineOnBroadcast: 2, fail: (n) => (n === 2 ? new RpcError('eth_sendRawTransaction: nonce too low') : undefined) });
+  const store = memStore();
+  await assert.rejects(lock({ evm: f.evm, cfg: { vault: VAULT } }, me, 1000n, store, { timeoutMs: 10 }), /timed out/);
+  const p = store.get()!;
+  const l = await lock({ evm: f.evm, cfg: { vault: VAULT } }, me, 1000n, store);
+  assert.equal(f.broadcasts.length, 2);
+  assert.equal(l.lockTx, p.hash);
+  assert.equal(l.nonce, 7n);
+  assert.equal(f.signedCount(), 1);
+});
+
+test('lock: an ambiguous send (gateway timeout, a wrapped 5xx, "nonce too low" not yet visible) keeps the lock pending', async () => {
+  const me = burnerOf(2);
+  for (const err of [new RpcError('eth_sendRawTransaction: upstream request timeout'), new RpcError('eth_sendRawTransaction: 502 bad gateway'),
+    new HttpError('eth_sendRawTransaction: HTTP 504: gateway timeout', 504), new RpcError('eth_sendRawTransaction: nonce too low'), new Error('fetch failed')]) {
+    const f = fakeEvm(me, { fail: () => err });
+    const store = memStore();
+    await assert.rejects(lock({ evm: f.evm, cfg: { vault: VAULT } }, me, 1000n, store), (e: unknown) => e instanceof StillPendingError && /stays pending/.test(e.message), err.message);
+    assert.ok(store.get(), `kept after: ${err.message}`);
+    // the retry resumes it, and a node refusal while the nonce has not moved drops it
+    const g = { ...f.evm, broadcast: async () => { throw new RpcError('eth_sendRawTransaction: transaction underpriced'); } };
+    await assert.rejects(lock({ evm: g, cfg: { vault: VAULT } }, me, 1000n, store), /refuses the lock/);
+    assert.equal(store.get(), null);
+  }
+});
+
+test('discard: a pending transfer is discardable only when the aggregator has no proof for its state', async () => {
+  const { w, bytes, me } = await held();
+  let p: PendingTx | undefined;
+  const refusing = fakeAgg(w, { status: 'REQUEST_EXPIRED', certifyAfter: Infinity });
+  await assert.rejects(transfer({ agg: refusing.agg }, me, bytes, signer(3).publicKey, undefined, (x) => (p = x), FAST), /refused the request: REQUEST_EXPIRED/);
+  assert.equal(await probePending(refusing.agg, p!), 'none');
+  const certified = fakeAgg(w, { preset: CertificationData.fromCBOR(unhex(p!.cd)) });
+  assert.equal(await probePending(certified.agg, p!), 'ours');
+  let other: PendingTx | undefined;
+  await assert.rejects(transfer({ agg: fakeAgg(w, { certifyAfter: Infinity }).agg }, me, bytes, signer(5).publicKey, undefined, (x) => (other = x), FAST));
+  assert.equal(await probePending(fakeAgg(w, { preset: CertificationData.fromCBOR(unhex(other!.cd)) }).agg, p!), 'other');
 });
 
 // ---- handoff messages ----------------------------------------------------------------------------------------------------------------------
