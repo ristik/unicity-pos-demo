@@ -49,11 +49,64 @@ const currentOr = (what: string): TokenRecord => need(current(), what);
 /** The lock signed but not yet seen in a receipt (bridge.lock): polled on a retry, never sent twice. */
 const pendingLock: bridge.PendingLockStore = {
   get: () => loadJson<bridge.PendingLock | null>('lock.pending', null),
-  put: (p) => {
+  // localStorage is the store; the IndexedDB copy is committed with durability 'strict' before the lock is broadcast, so a hard kill of the
+  // browser right after signing (localStorage not flushed yet) still leaves the record (restored by restorePendingLock on the next load)
+  put: async (p) => {
     saveJson('lock.pending', p);
+    await idbPendingLock('put', p);
   },
-  clear: () => remove('lock.pending'),
+  clear: () => {
+    remove('lock.pending');
+    void idbPendingLock('delete');
+  },
 };
+
+/** IndexedDB operations run one after another, in call order (a clear followed by a new lock must not delete the new copy). */
+let idbQueue: Promise<unknown> = Promise.resolve();
+function idbPendingLock(op: 'put' | 'delete' | 'get', p?: bridge.PendingLock): Promise<bridge.PendingLock | null> {
+  const next = idbQueue.then(() => idbOp(op, p));
+  idbQueue = next;
+  return next;
+}
+
+/** One operation on the IndexedDB copy of the pending lock (per profile), awaited until committed. Failures only lose the extra copy. */
+async function idbOp(op: 'put' | 'delete' | 'get', p?: bridge.PendingLock): Promise<bridge.PendingLock | null> {
+  try {
+    if (typeof indexedDB === 'undefined') return null;
+    const db = await new Promise<IDBDatabase>((ok, fail) => {
+      const r = indexedDB.open('unicity-demo', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('pending-lock');
+      r.onsuccess = () => ok(r.result);
+      r.onerror = () => fail(r.error);
+    });
+    try {
+      const tx = db.transaction('pending-lock', op === 'get' ? 'readonly' : 'readwrite', { durability: 'strict' });
+      const st = tx.objectStore('pending-lock');
+      const req = op === 'put' ? st.put(p, PROFILE) : op === 'delete' ? st.delete(PROFILE) : st.get(PROFILE);
+      await new Promise<void>((ok, fail) => {
+        tx.oncomplete = () => ok();
+        tx.onerror = () => fail(tx.error);
+        tx.onabort = () => fail(tx.error);
+      });
+      return op === 'get' ? ((req.result as bridge.PendingLock | undefined) ?? null) : null;
+    } finally {
+      db.close();
+    }
+  } catch (e) {
+    console.warn('pending lock: IndexedDB copy unavailable', e);
+    return null;
+  }
+}
+
+/** On load: a pending lock that only the IndexedDB copy holds (localStorage lost it in a hard kill) is put back. */
+async function restorePendingLock(): Promise<void> {
+  if (pendingLock.get()) return;
+  const p = await idbPendingLock('get');
+  if (p) {
+    saveJson('lock.pending', p);
+    fact('pending lock', `restored ${p.hash} from the IndexedDB copy`);
+  }
+}
 const need = <T>(v: T | null | undefined, what: string): T => {
   if (v === null || v === undefined) throw new Error(what);
   return v;
@@ -90,6 +143,7 @@ const NO_PIN = 'This build has no trust pin (VITE_TRUST_PIN, wallet/.env.product
   + 'the trust root from the server it is meant to check. Rebuild with the pin, or set one under Network settings (developer option).';
 
 async function connect(): Promise<string> {
+  await restorePendingLock();
   const agg = new AggregatorClient(abs(settings.aggregator));
   const pin = settings.trustPin.trim();
   if (!pin) throw new Error(NO_PIN);
@@ -152,8 +206,17 @@ const amountInput = h('input', { value: load('amount') ?? '0.001', size: '8', in
 const recipientInput = h('input', { placeholder: 'EVM address (default: this wallet)', size: '44', 'aria-label': 'return recipient' });
 const peerSelect = h('select', { 'aria-label': 'receiving tab' });
 
+/** The token record's side of a transfer or burn: its pending and discarded transactions. */
+const spendCtx = (t: TokenRecord): bridge.SpendCtx => ({
+  pending: t.pending,
+  discarded: t.discarded,
+  persist: (p) => patchToken(t.id, { pending: p }),
+  restore: (p) => patchToken(t.id, { pending: p, discarded: (getToken(t.id)?.discarded ?? []).filter((x) => x.cd !== p.cd) }),
+});
+
 const resumes = (t: TokenRecord | undefined, kind: 'transfer' | 'burn'): string | undefined =>
-  t?.pending?.kind === kind ? `A ${kind} built ${new Date(t.pending.at).toLocaleTimeString()} is stored: Run certifies that same transaction, it never builds another.` : undefined;
+  t?.pending?.kind === kind ? `A ${kind} built ${new Date(t.pending.at).toLocaleTimeString()} is stored: Run certifies that same transaction, it never builds another.`
+    + (t.pending.refused ? ` The aggregator refused it (${t.pending.refused}): it can be discarded.` : '') : undefined;
 
 const STEPS: StepDef[] = [
   {
@@ -195,19 +258,22 @@ const STEPS: StepDef[] = [
   {
     key: 'transfer', title: 'Transfer to another tab', phase: 'minted', what: 'A certified transfer to the other tab\'s public key, then the token file goes over a BroadcastChannel. The receiver stores it, then verifies it offline.',
     input: () => h('span', {}, peerSelect, ' ', h('button', { class: 'link', onclick: () => window.open(`?w=${PROFILE === 'b' ? 'a' : 'b'}`, '_blank') }, `open tab ${PROFILE === 'b' ? 'A' : 'B'}`)),
-    note: (t) => resumes(t, 'transfer') && `${resumes(t, 'transfer')} Its recipient is tab ${t?.to?.toUpperCase()}.`,
+    note: (t) => resumes(t, 'transfer') && `${resumes(t, 'transfer')} Its recipient is tab ${(t?.pending?.toProfile ?? t?.to)?.toUpperCase()}.`,
     resumes: 'transfer',
     run: async () => {
       const t = currentOr('select a token');
       const resume = t.pending?.kind === 'transfer' ? t.pending : undefined;
       const peer = resume ? undefined : need(peers.get(peerSelect.value), 'no receiving tab: open one with the link');
-      const to = resume ? need(t.to, 'the pending transfer has no recipient tab') : peer!.profile;
+      const toProfile = resume ? need(resume.toProfile ?? t.to, 'the pending transfer has no recipient tab') : peer!.profile;
       const toKey = resume ? need(resume.toPublicKey, 'the pending transfer has no recipient key') : peer!.publicKey;
-      const out = await bridge.transfer(sess(), me, unhex(t.bytes!), unhex(toKey), t.pending, (p) => patchToken(t.id, { pending: p, to }));
+      const r = await bridge.transfer(sess(), me, unhex(t.bytes!), { publicKey: unhex(toKey), profile: toProfile }, spendCtx(t));
+      // a restored (discarded, then certified) transfer has its own recipient
+      const to = need(r.used.toProfile ?? toProfile, 'the certified transfer has no recipient tab');
+      const out = r.bytes;
       // stored as sent before it is posted: if the other tab misses it, "Resend" posts it again
-      patchToken(t.id, { phase: 'sent', bytes: hex(out), to, toPublicKey: toKey, pending: undefined });
+      patchToken(t.id, { phase: 'sent', bytes: hex(out), to, toPublicKey: r.used.toPublicKey ?? toKey, pending: undefined });
       handoff.sendToken(to, out, BigInt(t.amountWei));
-      fact('handed to', `tab ${to.toUpperCase()} (${toKey.slice(0, 16)}…)`);
+      fact('handed to', `tab ${to.toUpperCase()} (${(r.used.toPublicKey ?? toKey).slice(0, 16)}…)`);
       return `sent to tab ${to.toUpperCase()}`;
     },
   },
@@ -238,9 +304,10 @@ const STEPS: StepDef[] = [
       const t = currentOr('select a token');
       const to = t.pending?.kind === 'burn' ? need(t.pending.recipient, 'the pending burn has no recipient') : recipientInput.value.trim() || me.evmAddress;
       if (!isAddress(to)) throw new Error(`not an address: ${to}`);
-      const out = await bridge.burn(sess(), me, unhex(t.bytes!), to, t.pending, (p) => patchToken(t.id, { pending: p }));
-      patchToken(t.id, { phase: 'burned', bytes: hex(out), recipient: to, pending: undefined });
-      return `burned for ${to.slice(0, 10)}…`;
+      const r = await bridge.burn(sess(), me, unhex(t.bytes!), to, spendCtx(t));
+      const recipient = r.used.recipient ?? to;
+      patchToken(t.id, { phase: 'burned', bytes: hex(r.bytes), recipient, pending: undefined });
+      return `burned for ${recipient.slice(0, 10)}…`;
     },
   },
   {
@@ -385,7 +452,8 @@ function stepRow(d: StepDef, t: TokenRecord | undefined): HTMLElement {
       st ? h('span', { class: st.ok ? 'msg' : 'msg bad' }, st.text) : ''),
     h('p', { class: 'what' }, d.what),
     d.note?.(t) ? h('p', { class: 'warn' }, d.note(t)!,
-      d.resumes && t?.pending?.kind === d.resumes ? h('button', { class: 'link', disabled: !!busy || !session, onclick: () => discardPending(t.id, d.key) }, 'discard pending') : '') : '',
+      // only after an explicit refusal: a timeout means the request may still be certified
+      d.resumes && t?.pending?.kind === d.resumes && t.pending.refused ? h('button', { class: 'link', disabled: !!busy || !session, onclick: () => discardPending(t.id, d.key) }, 'discard pending') : '') : '',
     drawer(d.key));
 }
 /**
@@ -395,16 +463,17 @@ function stepRow(d: StepDef, t: TokenRecord | undefined): HTMLElement {
 function discardPending(id: string, key: string): void {
   const t = getToken(id);
   const p = t?.pending;
-  if (!p) return;
-  if (!confirm(`Discard the pending ${p.kind}? Only do this when the aggregator refused it. The aggregator is checked first: if the ${p.kind} `
-    + 'is certified it is kept. After a discard, Run builds a new transaction.')) return;
+  if (!p?.refused) return;
+  if (!confirm(`Discard the pending ${p.kind}? The aggregator refused it (${p.refused}). It is checked again first: if the ${p.kind} is `
+    + 'certified or still being included, it is kept. After a discard, Run builds a new transaction; if the discarded one is certified after all, it is restored.')) return;
   const why = status.get(key)?.text ?? 'discarded by the user';
   void step(key, async () => {
     const r = await bridge.probePending(sess().agg, p);
-    fact('probe', r === 'none' ? 'no proof for this state id' : r === 'ours' ? 'certified for this transaction' : 'certified for another transaction');
+    fact('probe', { none: 'no proof for this state id, no pending hint', pending: 'the aggregator hints it is being included', ours: 'certified for this transaction', other: 'certified for another transaction' }[r]);
+    if (r === 'pending') throw new Error(`the aggregator says the ${p.kind} is still being included: not discarded; Run waits for it`);
     if (r === 'ours') throw new Error(`the ${p.kind} is certified: not discarded; Run finishes it`);
     if (r === 'other') throw new Error(`the token's state is certified for another transaction: this token is spent elsewhere; the pending ${p.kind} is kept for the record`);
-    patchToken(id, { pending: undefined, discarded: [...(t.discarded ?? []), { ...p, discardedAt: Date.now(), why }] });
+    patchToken(id, { pending: undefined, discarded: [...(getToken(id)?.discarded ?? []), { ...p, discardedAt: Date.now(), why }] });
     return `discarded the pending ${p.kind}: Run builds a new one`;
   });
 }

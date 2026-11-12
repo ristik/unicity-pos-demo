@@ -82,11 +82,21 @@ export type Certifier = Pick<AggregatorClient, 'submitCertificationRequest' | 'g
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 export class ConflictError extends Error {
-  constructor(message: string) {
+  constructor(message: string, readonly proof: InclusionProof) {
     super(message);
     this.name = 'ConflictError';
   }
 }
+
+/** The aggregator refused the request outright (a status that is neither accepted nor queued) and holds no proof for its state. */
+export class RefusedError extends Error {
+  constructor(message: string, readonly status: string) {
+    super(message);
+    this.name = 'RefusedError';
+  }
+}
+
+type CertifyOpts = { timeoutMs?: number; everyMs?: number; onAccepted?: (status: string) => void };
 
 /** True when the proof certifies exactly this request (same source state, same transaction hash). */
 export const proofIsFor = (proof: InclusionProof, cd: CertificationData): boolean =>
@@ -96,13 +106,13 @@ export const proofIsFor = (proof: InclusionProof, cd: CertificationData): boolea
  * Certify one request and return its inclusion proof. Safe to call again with the same request: a proof already present is taken
  * (a retry after the proof arrived), "already submitted" counts as accepted, and every proof is checked to certify this transaction.
  */
-export async function certify(agg: Certifier, cd: CertificationData, what: string, opts: { timeoutMs?: number; everyMs?: number } = {}): Promise<InclusionProof> {
+export async function certify(agg: Certifier, cd: CertificationData, what: string, opts: CertifyOpts = {}): Promise<InclusionProof> {
   const sid = await StateId.fromCertificationData(cd);
   const t0 = performance.now();
   const check = (proof: InclusionProof): InclusionProof => {
     if (!proofIsFor(proof, cd)) {
       throw new ConflictError(`${what}: the state is certified for another transaction (${hex(proof.certificationData.transactionHash.data).slice(0, 16)}…, `
-        + `not ${hex(cd.transactionHash.data).slice(0, 16)}…); this one can never be certified`);
+        + `not ${hex(cd.transactionHash.data).slice(0, 16)}…); this one can never be certified`, proof);
     }
     return proof;
   };
@@ -117,7 +127,9 @@ export async function certify(agg: Certifier, cd: CertificationData, what: strin
     if (!r.isAccepted && !r.isStateIdQueued) {
       // a refusal; an unknown status means "not accepted", so look once for a proof before giving up
       const late = (await agg.getInclusionProof(sid)).inclusionProof;
-      if (!late) throw new Error(`${what}: the aggregator refused the request: ${r.status}`);
+      if (!late) throw new RefusedError(`${what}: the aggregator refused the request: ${r.status}`, r.status);
+    } else {
+      opts.onAccepted?.(r.status);
     }
   }
   const proof = check(held ?? await waitFor(`${what} to be certified`, opts.timeoutMs ?? 180_000, async () => (await agg.getInclusionProof(sid)).inclusionProof ?? undefined, opts.everyMs ?? 1000));
@@ -139,7 +151,8 @@ export interface Lock { nonce: bigint; amountWei: bigint; lockTx: string; lockBl
 
 /** A signed lock transaction not yet seen in a receipt: kept (localStorage) before it is broadcast, so it is polled, never sent twice. */
 export interface PendingLock { hash: string; raw: string; txNonce: string; amountWei: string; at: number }
-export interface PendingLockStore { get(): PendingLock | null; put(p: PendingLock): void; clear(): void }
+/** `put` may be async (a durable write): lock awaits it before broadcasting. */
+export interface PendingLockStore { get(): PendingLock | null; put(p: PendingLock): void | Promise<void>; clear(): void }
 /** What lock needs of the EVM (a fake in the tests). */
 export type LockEvm = Pick<Evm, 'sign' | 'broadcast' | 'receipt' | 'waitReceipt' | 'rpc'>;
 
@@ -148,8 +161,8 @@ export type LockEvm = Pick<Evm, 'sign' | 'broadcast' | 'receipt' | 'waitReceipt'
  * upstream timeout or 5xx the gateway wraps in a JSON-RPC error, "nonce too low" (it may have just been mined), "already known".
  */
 export const isRefusal = (e: unknown): boolean =>
-  e instanceof RpcError && !alreadyKnown(e.message) && !/nonce too low|timeout|timed out|deadline|upstream|gateway|unavailable|temporar|busy|overload|\b5\d\d\b|connect|reset|eof/i.test(e.message)
-  && /insufficient funds|underpriced|intrinsic gas|gas limit|exceeds block gas|invalid (sender|signature|chain|transaction)|chain ?id|nonce too high|fee cap|max fee|tip higher|oversized|rlp/i.test(e.message);
+  e instanceof RpcError && !alreadyKnown(e.message) && !/nonce too (low|high)|timeout|timed out|deadline|upstream|gateway|unavailable|temporar|busy|overload|\b5\d\d\b|connect|reset|eof/i.test(e.message)
+  && /insufficient funds|underpriced|intrinsic gas|gas limit|exceeds block gas|invalid (sender|signature|chain|transaction)|chain ?id|fee cap|max fee|tip higher|oversized|rlp/i.test(e.message);
 
 /** Thrown when a lock's fate is not known yet: it stays pending, and the next Run polls it again. */
 export class StillPendingError extends Error {
@@ -166,16 +179,27 @@ export class StillPendingError extends Error {
  * a receipt, or proof that it can never be mined (its account nonce went to another transaction, or the node refused it outright while the
  * nonce had not moved). When in doubt it stays pending.
  */
-export async function lock(s: { evm: LockEvm; cfg: Pick<TesterConfig, 'vault'> }, me: Burner, amountWei: bigint, store: PendingLockStore, opts: { timeoutMs?: number } = {}): Promise<Lock & { resumed: boolean }> {
+export async function lock(s: { evm: LockEvm; cfg: Pick<TesterConfig, 'vault'> }, me: Burner, amountWei: bigint, store: PendingLockStore,
+  opts: { timeoutMs?: number; recheckMs?: number } = {}): Promise<Lock & { resumed: boolean }> {
   let p = store.get();
   const resumed = !!p;
-  /** What the chain says now: mined (receipt), replaced (nonce used, no receipt), or open (neither). */
-  const settle = async (q: PendingLock): Promise<'mined' | 'replaced' | 'open'> => {
+  /** What the chain says now: mined (receipt), replaced (nonce used, no receipt), or open (neither). One read; see settle. */
+  const settleOnce = async (q: PendingLock): Promise<'mined' | 'replaced' | 'open'> => {
     if (await s.evm.receipt(q.hash)) return 'mined';
     const used = BigInt(await s.evm.rpc<string>('eth_getTransactionCount', [me.evmAddress, 'latest']));
     // the receipt again: the transaction may be mined between the two reads
     if (await s.evm.receipt(q.hash)) return 'mined';
     return used > BigInt(q.txNonce) ? 'replaced' : 'open';
+  };
+  /**
+   * settleOnce, with "replaced" confirmed by a second read a few seconds later: behind a load-balanced RPC the nonce can come from a node
+   * that has the block while the receipt read hits one that does not yet. A disagreement reads as "open" (kept pending).
+   */
+  const settle = async (q: PendingLock): Promise<'mined' | 'replaced' | 'open'> => {
+    const first = await settleOnce(q);
+    if (first !== 'replaced') return first;
+    await sleep(opts.recheckMs ?? 4000);
+    return settleOnce(q);
   };
   const replaced = (q: PendingLock): never => {
     store.clear();
@@ -213,7 +237,7 @@ export async function lock(s: { evm: LockEvm; cfg: Pick<TesterConfig, 'vault'> }
     const data = calldata('lock(bytes)', encBytes(me.predicate));
     const signed = await s.evm.sign(me.secret, { to: s.cfg.vault, data, value: amountWei });
     p = { hash: signed.hash, raw: signed.raw, txNonce: signed.nonce.toString(), amountWei: amountWei.toString(), at: Date.now() };
-    store.put(p);
+    await store.put(p);
     fact('tx', signed.hash);
     fact('calldata', `${data.length} bytes (p0 = owner predicate, ${me.predicate.length} bytes)`);
     fact('signed tx', `${(signed.raw.length - 2) / 2} bytes, gas limit ${signed.gas}, gas price ${signed.gasPrice}, account nonce ${signed.nonce}`);
@@ -280,20 +304,46 @@ export async function mint(s: Session, me: Burner, l: Lock, lockProof: Uint8Arra
 export type PendingTx = NonNullable<TokenRecord['pending']>;
 
 /**
- * Before a stored transfer or burn is discarded: is its state certified, and for which transaction? 'none' (no proof: safe to discard and
- * build another), 'ours' (certified: Run finishes it, never discard), 'other' (spent by another transaction).
+ * Before a stored transfer or burn is discarded: is its state certified, and for which transaction? 'none' (no proof, and the aggregator does
+ * not hint that it is pending), 'pending' (the aggregator's hint says it is being included: never discard), 'ours' (certified: Run finishes
+ * it), 'other' (spent by another transaction). The hint is unauthenticated: it can only block a discard, never allow one by itself (discard
+ * is offered only after an explicit refusal, and spend recovers a discarded request that gets certified anyway).
  */
-export async function probePending(agg: Certifier, p: PendingTx): Promise<'none' | 'ours' | 'other'> {
+export async function probePending(agg: Certifier, p: PendingTx): Promise<'none' | 'pending' | 'ours' | 'other'> {
   const cd = CertificationData.fromCBOR(unhex(p.cd));
-  const proof = (await agg.getInclusionProof(await StateId.fromCertificationData(cd))).inclusionProof;
-  if (!proof) return 'none';
-  return proofIsFor(proof, cd) ? 'ours' : 'other';
+  const r = await agg.getInclusionProof(await StateId.fromCertificationData(cd), { includeStatusHint: true });
+  if (r.inclusionProof) return proofIsFor(r.inclusionProof, cd) ? 'ours' : 'other';
+  return r.statusHint === 'pending' || r.statusHint === 'included' ? 'pending' : 'none';
 }
 
-/** Certify the stored transaction, or build, store (`persist`) and certify a new one; the token file grows by [tx, proof]. */
-async function spend(agg: Certifier, me: Burner, bytes: Uint8Array, pending: PendingTx | undefined, kind: PendingTx['kind'],
-  build: () => Promise<{ tx: TransferTransaction; extra: Pick<PendingTx, 'toPublicKey' | 'recipient'> }>, persist: (p: PendingTx) => void,
-  opts?: { timeoutMs?: number; everyMs?: number }): Promise<Uint8Array> {
+/** What a transfer or burn reads and writes on its token record. */
+export interface SpendCtx {
+  /** the stored transaction to resume, if any */
+  pending?: PendingTx;
+  /** transactions the user discarded earlier: one of them may still have been certified */
+  discarded?: PendingTx[];
+  /** store `p` as the record's pending transaction (before submission; again when its refusal mark changes) */
+  persist: (p: PendingTx) => void;
+  /** a discarded transaction turned out certified: make it the record's pending one again and drop it from `discarded` */
+  restore?: (p: PendingTx) => void;
+}
+
+/** A discarded transaction of the certified state was certified after all; it is restored as pending. Run its step to finish it. */
+export class RestoredError extends Error {
+  constructor(message: string, readonly restored: PendingTx) {
+    super(message);
+    this.name = 'RestoredError';
+  }
+}
+
+/**
+ * Certify the stored transaction, or build, store and certify a new one; the token file grows by [tx, proof]. Returns the transaction
+ * that was certified, which on a recovery is a restored discarded one (its recipient, not the one asked for).
+ */
+async function spend(agg: Certifier, me: Burner, bytes: Uint8Array, ctx: SpendCtx, kind: PendingTx['kind'],
+  build: () => Promise<{ tx: TransferTransaction; extra: Pick<PendingTx, 'toPublicKey' | 'recipient' | 'toProfile'> }>,
+  opts?: { timeoutMs?: number; everyMs?: number }): Promise<{ bytes: Uint8Array; used: PendingTx }> {
+  const { pending } = ctx;
   if (pending && pending.kind !== kind) throw new Error(`a ${pending.kind} of this token is pending: run it to finish (the token's state is already being spent)`);
   let p = pending;
   if (p) {
@@ -302,34 +352,56 @@ async function spend(agg: Certifier, me: Burner, bytes: Uint8Array, pending: Pen
     const { tx, extra } = await build();
     const cd = await CertificationData.fromTransaction(tx, await SignaturePredicateUnlockScript.create(tx, me.signer));
     p = { kind, tx: hex(tx.toCBOR()), cd: hex(cd.toCBOR()), at: Date.now(), ...extra };
-    persist(p);
+    ctx.persist(p);
   }
-  const proof = await certify(agg, CertificationData.fromCBOR(unhex(p.cd)), kind, opts);
-  const out = appendTransaction(bytes, unhex(p.tx), proof.toCBOR());
+  const cur = p;
+  let proof: InclusionProof;
+  let used = cur;
+  try {
+    proof = await certify(agg, CertificationData.fromCBOR(unhex(cur.cd)), kind, {
+      ...opts,
+      onAccepted: () => {
+        if (cur.refused) ctx.persist((used = { ...cur, refused: undefined }));
+      },
+    });
+  } catch (e) {
+    if (e instanceof RefusedError) ctx.persist({ ...cur, refused: e.status });
+    if (!(e instanceof ConflictError)) throw e;
+    // the state is certified for another transaction: one the user discarded earlier, certified late?
+    const d = (ctx.discarded ?? []).find((x) => proofIsFor(e.proof, CertificationData.fromCBOR(unhex(x.cd))));
+    if (!d) throw e;
+    const restored: PendingTx = { kind: d.kind, tx: d.tx, cd: d.cd, at: d.at, toPublicKey: d.toPublicKey, recipient: d.recipient, toProfile: d.toProfile };
+    ctx.restore?.(restored);
+    fact('recovered', `the ${d.kind} discarded at ${d.discardedAt ? new Date(d.discardedAt).toISOString() : '?'} is certified: restored, the new ${kind} is dropped`);
+    if (d.kind !== kind) throw new RestoredError(`the ${d.kind} discarded earlier was certified after all: it is restored as pending; run ${d.kind} to finish it`, restored);
+    proof = e.proof;
+    used = restored;
+  }
+  const out = appendTransaction(bytes, unhex(used.tx), proof.toCBOR());
   fact('token', `${bytes.length} → ${out.length} bytes`);
-  return out;
+  return { bytes: out, used };
 }
 
-/** A certified transfer to another owner's public key. With `pending`, its stored recipient is used, whatever `toPublicKey` says. */
-export async function transfer(s: Pick<Session, 'agg'>, me: Burner, bytes: Uint8Array, toPublicKey: Uint8Array, pending: PendingTx | undefined, persist: (p: PendingTx) => void,
-  opts?: { timeoutMs?: number; everyMs?: number }): Promise<Uint8Array> {
-  return spend(s.agg, me, bytes, pending, 'transfer', async () => {
+/** A certified transfer to another owner's public key. With a pending one, its stored recipient is used, whatever `toPublicKey` says. */
+export async function transfer(s: Pick<Session, 'agg'>, me: Burner, bytes: Uint8Array, to: { publicKey: Uint8Array; profile?: string }, ctx: SpendCtx,
+  opts?: { timeoutMs?: number; everyMs?: number }): Promise<{ bytes: Uint8Array; used: PendingTx }> {
+  return spend(s.agg, me, bytes, ctx, 'transfer', async () => {
     const token = await Token.fromCBOR(bytes);
-    return { tx: await TransferTransaction.create(token, SignaturePredicate.create(toPublicKey), StateMask.generate()), extra: { toPublicKey: hex(toPublicKey) } };
-  }, persist, opts);
+    return { tx: await TransferTransaction.create(token, SignaturePredicate.create(to.publicKey), StateMask.generate()), extra: { toPublicKey: hex(to.publicKey), toProfile: to.profile } };
+  }, opts);
 }
 
 /** A transfer to BurnPredicate(sha256(reason)), the reason naming the EVM recipient and amount the vault will credit. */
-export async function burn(s: Pick<Session, 'agg' | 'vaultCfg' | 'bridge' | 'trust'>, me: Burner, bytes: Uint8Array, recipient: string, pending: PendingTx | undefined, persist: (p: PendingTx) => void,
-  opts?: { timeoutMs?: number; everyMs?: number }): Promise<Uint8Array> {
-  return spend(s.agg, me, bytes, pending, 'burn', async () => {
+export async function burn(s: Pick<Session, 'agg' | 'vaultCfg' | 'bridge' | 'trust'>, me: Burner, bytes: Uint8Array, recipient: string, ctx: SpendCtx,
+  opts?: { timeoutMs?: number; everyMs?: number }): Promise<{ bytes: Uint8Array; used: PendingTx }> {
+  return spend(s.agg, me, bytes, ctx, 'burn', async () => {
     const { vaultCfg } = s;
     const v = await withTrustRefresh(s.trust, s.agg, () => s.bridge.verifyNativeTokenBytes(bytes, 'receipt'));
     const reason = returnReason(vaultCfg.chainId, vaultCfg.vault, vaultCfg.zeroAddress, vaultCfg.ty, vaultCfg.aid, unhex(recipient), v.outcome.amount);
     const token = await Token.fromCBOR(bytes);
     fact('return reason', `${reason.length} bytes → ${recipient}`);
     return { tx: await TransferTransaction.create(token, BurnPredicate.create(sha256(reason)), StateMask.generate(), { data: reason }), extra: { recipient } };
-  }, persist, opts);
+  }, opts);
 }
 
 // ---- 6. return proof -------------------------------------------------------------------------------------------------------------------------

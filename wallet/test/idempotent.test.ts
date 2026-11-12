@@ -14,7 +14,7 @@ import type { InclusionProof } from '@unicitylabs/state-transition-sdk/lib/api/I
 import { StateId } from '@unicitylabs/state-transition-sdk/lib/api/StateId.js';
 import { Token } from '@unicitylabs/state-transition-sdk/lib/transaction/Token.js';
 
-import { burn, certify, ConflictError, lock, probePending, StillPendingError, transfer, type LockEvm, type PendingLock, type PendingTx } from '../src/bridge.js';
+import { burn, certify, ConflictError, lock, probePending, RefusedError, RestoredError, StillPendingError, transfer, type LockEvm, type PendingLock, type PendingTx, type SpendCtx } from '../src/bridge.js';
 import { calldata, encBytes, HttpError, LOCKED_TOPIC, RpcError, type Receipt } from '../src/evm.js';
 import { parseMessage } from '../src/handoff.js';
 import { hex, unhex } from '../src/hex.js';
@@ -32,7 +32,7 @@ const burnerOf = (n: number) => burnerFrom(sha(Uint8Array.of(0x73, n)));
  * A fake aggregator: it records every submitted request, answers `status`, and certifies the first request it accepts for a state id once
  * `certifyAfter` polls have passed (never, with Infinity). `preset` puts a proof of some other request in place up front.
  */
-function fakeAgg(w: World, o: { status?: string; certifyAfter?: number; preset?: CertificationData } = {}) {
+function fakeAgg(w: World, o: { status?: string; certifyAfter?: number; preset?: CertificationData; hints?: boolean } = {}) {
   const submitted: Uint8Array[] = [];
   const queued = new Map<string, CertificationData>();
   const proofs = new Map<string, InclusionProof>();
@@ -49,11 +49,12 @@ function fakeAgg(w: World, o: { status?: string; certifyAfter?: number; preset?:
       if (!queued.has(k)) queued.set(k, cd);
       return CertificationResponse.create(o.status ?? 'SUCCESS');
     },
-    async getInclusionProof(sid: StateId) {
+    async getInclusionProof(sid: StateId, opt?: { includeStatusHint?: boolean }) {
       await ready;
       const k = hex(sid.data);
       if (!proofs.has(k) && queued.has(k) && ++polls > (o.certifyAfter ?? 0)) proofs.set(k, await certifyRequest(w, queued.get(k)!, T0 + 20n, UC_TS));
-      return { inclusionProof: proofs.get(k) ?? null };
+      const statusHint = o.hints && opt?.includeStatusHint ? (proofs.has(k) ? 'included' : queued.has(k) ? 'pending' : 'unknown') : null;
+      return { inclusionProof: proofs.get(k) ?? null, statusHint };
     },
   };
   return { agg: agg as unknown as AggregatorClient, submitted };
@@ -71,14 +72,14 @@ test('transfer: a retry after a timeout resubmits the stored request, and the to
   const to = signer(3).publicKey;
   let stored: PendingTx | undefined;
   const first = fakeAgg(w, { certifyAfter: Infinity });
-  await assert.rejects(transfer({ agg: first.agg }, me, bytes, to, undefined, (p) => (stored = p), FAST), /timed out/);
+  await assert.rejects(transfer({ agg: first.agg }, me, bytes, { publicKey: to }, { persist: (p) => (stored = p) }, FAST), /timed out/);
   assert.ok(stored, 'the transaction is stored before it is submitted');
   assert.equal(stored.kind, 'transfer');
   assert.equal(stored.toPublicKey, hex(to));
   // the page reloads; the aggregator says it already holds the request
   const again = fakeAgg(w, { status: 'ALREADY_SUBMITTED' });
   let rebuilt = false;
-  const out = await transfer({ agg: again.agg }, me, bytes, signer(4).publicKey, stored, () => (rebuilt = true), FAST);
+  const { bytes: out } = await transfer({ agg: again.agg }, me, bytes, { publicKey: signer(4).publicKey }, { pending: stored, persist: () => (rebuilt = true) }, FAST);
   assert.equal(rebuilt, false, 'no new transaction is built');
   assert.deepEqual(again.submitted.map(hex), first.submitted.map(hex), 'the same signed request');
   assert.equal(hex(again.submitted[0]), stored.cd);
@@ -91,10 +92,10 @@ test('transfer: a retry after the proof arrived takes the proof without submitti
   const { w, bytes, me } = await held();
   let stored: PendingTx | undefined;
   const a = fakeAgg(w);
-  const out1 = await transfer({ agg: a.agg }, me, bytes, signer(3).publicKey, undefined, (p) => (stored = p), FAST);
+  const { bytes: out1 } = await transfer({ agg: a.agg }, me, bytes, { publicKey: signer(3).publicKey }, { persist: (p) => (stored = p) }, FAST);
   // the record was not updated (a reload right after the proof): the next run has only the stored transaction
   const before = a.submitted.length;
-  const out2 = await transfer({ agg: a.agg }, me, bytes, signer(3).publicKey, stored, () => assert.fail('rebuilt'), FAST);
+  const { bytes: out2 } = await transfer({ agg: a.agg }, me, bytes, { publicKey: signer(3).publicKey }, { pending: stored, persist: () => assert.fail('rebuilt') }, FAST);
   assert.equal(a.submitted.length, before, 'nothing submitted');
   assert.equal(hex(out2), hex(out1));
 });
@@ -103,16 +104,16 @@ test('certify: a proof of another transaction for the same state is a ConflictEr
   const { w, bytes, me } = await held();
   // another transfer of the same state got certified first (an earlier run with a fresh mask)
   let other: PendingTx | undefined;
-  await assert.rejects(transfer({ agg: fakeAgg(w, { certifyAfter: Infinity }).agg }, me, bytes, signer(5).publicKey, undefined, (p) => (other = p), FAST));
+  await assert.rejects(transfer({ agg: fakeAgg(w, { certifyAfter: Infinity }).agg }, me, bytes, { publicKey: signer(5).publicKey }, { persist: (p) => (other = p) }, FAST));
   const preset = CertificationData.fromCBOR(unhex(other!.cd));
   const agg = fakeAgg(w, { preset, status: 'STATE_ID_QUEUED' });
-  await assert.rejects(transfer({ agg: agg.agg }, me, bytes, signer(3).publicKey, undefined, () => undefined, FAST), (e: unknown) => e instanceof ConflictError && /another transaction/.test(e.message));
+  await assert.rejects(transfer({ agg: agg.agg }, me, bytes, { publicKey: signer(3).publicKey }, { persist: () => undefined }, FAST), (e: unknown) => e instanceof ConflictError && /another transaction/.test(e.message));
 });
 
 test('certify: a refused request with no proof fails with the status', async () => {
   const { w, bytes, me } = await held();
   let stored: PendingTx | undefined;
-  await assert.rejects(transfer({ agg: fakeAgg(w, { certifyAfter: Infinity }).agg }, me, bytes, signer(3).publicKey, undefined, (p) => (stored = p), FAST));
+  await assert.rejects(transfer({ agg: fakeAgg(w, { certifyAfter: Infinity }).agg }, me, bytes, { publicKey: signer(3).publicKey }, { persist: (p) => (stored = p) }, FAST));
   const cd = CertificationData.fromCBOR(unhex(stored!.cd));
   const refusing = fakeAgg(w, { status: 'SIGNATURE_VERIFICATION_FAILED', certifyAfter: Infinity });
   await assert.rejects(certify(refusing.agg, cd, 'transfer', FAST), /refused the request: SIGNATURE_VERIFICATION_FAILED/);
@@ -128,15 +129,15 @@ test('burn: the stored burn is resumed; a pending transfer blocks a burn', async
   const recipient = `0x${'d0'.repeat(20)}`;
   let stored: PendingTx | undefined;
   const first = fakeAgg(w, { certifyAfter: Infinity });
-  await assert.rejects(burn(s(first.agg), me, bytes, recipient, undefined, (p) => (stored = p), FAST), /timed out/);
+  await assert.rejects(burn(s(first.agg), me, bytes, recipient, { persist: (p) => (stored = p) }, FAST), /timed out/);
   assert.equal(stored?.kind, 'burn');
   assert.equal(stored?.recipient, recipient);
   const again = fakeAgg(w);
-  const out = await burn(s(again.agg), me, bytes, `0x${'11'.repeat(20)}`, stored, () => assert.fail('rebuilt'), FAST);
+  const { bytes: out } = await burn(s(again.agg), me, bytes, `0x${'11'.repeat(20)}`, { pending: stored, persist: () => assert.fail('rebuilt') }, FAST);
   assert.deepEqual(again.submitted.map(hex), first.submitted.map(hex));
   await w.bridge.verifyNativeTokenBytes(out, 'return');
   const pendingTransfer: PendingTx = { ...stored!, kind: 'transfer' };
-  await assert.rejects(burn(s(again.agg), me, bytes, recipient, pendingTransfer, () => undefined, FAST), /a transfer of this token is pending/);
+  await assert.rejects(burn(s(again.agg), me, bytes, recipient, { pending: pendingTransfer, persist: () => undefined }, FAST), /a transfer of this token is pending/);
 });
 
 // ---- lock ------------------------------------------------------------------------------------------------------------------------------------
@@ -235,7 +236,7 @@ test('lock: the pending lock is dropped when its account nonce is taken by anoth
   const store = memStore();
   await assert.rejects(lock({ evm: f.evm, cfg: { vault: VAULT } }, me, 1000n, store, { timeoutMs: 10 }));
   f.evm.takeNonce();
-  await assert.rejects(lock({ evm: f.evm, cfg: { vault: VAULT } }, me, 1000n, store), /used by another transaction/);
+  await assert.rejects(lock({ evm: f.evm, cfg: { vault: VAULT } }, me, 1000n, store, { recheckMs: 5 }), /used by another transaction/);
   assert.equal(store.get(), null);
   // a fresh lock that the node refuses outright leaves nothing pending
   const r = fakeEvm(me, { refuse: 'insufficient funds for gas * price + value' });
@@ -280,13 +281,100 @@ test('discard: a pending transfer is discardable only when the aggregator has no
   const { w, bytes, me } = await held();
   let p: PendingTx | undefined;
   const refusing = fakeAgg(w, { status: 'REQUEST_EXPIRED', certifyAfter: Infinity });
-  await assert.rejects(transfer({ agg: refusing.agg }, me, bytes, signer(3).publicKey, undefined, (x) => (p = x), FAST), /refused the request: REQUEST_EXPIRED/);
+  await assert.rejects(transfer({ agg: refusing.agg }, me, bytes, { publicKey: signer(3).publicKey }, { persist: (x) => (p = x) }, FAST), /refused the request: REQUEST_EXPIRED/);
   assert.equal(await probePending(refusing.agg, p!), 'none');
   const certified = fakeAgg(w, { preset: CertificationData.fromCBOR(unhex(p!.cd)) });
   assert.equal(await probePending(certified.agg, p!), 'ours');
   let other: PendingTx | undefined;
-  await assert.rejects(transfer({ agg: fakeAgg(w, { certifyAfter: Infinity }).agg }, me, bytes, signer(5).publicKey, undefined, (x) => (other = x), FAST));
+  await assert.rejects(transfer({ agg: fakeAgg(w, { certifyAfter: Infinity }).agg }, me, bytes, { publicKey: signer(5).publicKey }, { persist: (x) => (other = x) }, FAST));
   assert.equal(await probePending(fakeAgg(w, { preset: CertificationData.fromCBOR(unhex(other!.cd)) }).agg, p!), 'other');
+});
+
+/** A token record's pending/discarded fields, as main.ts keeps them (spendCtx), with the "discard pending" action. */
+function record() {
+  const r: { pending?: PendingTx; discarded: PendingTx[] } = { discarded: [] };
+  const ctx = (): SpendCtx => ({
+    pending: r.pending, discarded: r.discarded,
+    persist: (p) => void (r.pending = p),
+    restore: (p) => {
+      r.pending = p;
+      r.discarded = r.discarded.filter((x) => x.cd !== p.cd);
+    },
+  });
+  const discard = () => {
+    // main.ts offers it only after an explicit refusal
+    assert.ok(r.pending?.refused, 'discard is offered only after a refusal');
+    r.discarded.push({ ...r.pending!, discardedAt: Date.now() });
+    r.pending = undefined;
+  };
+  return { r, ctx, discard };
+}
+
+test('discard: after a timeout it is not offered, and the aggregator\'s pending hint refuses it', async () => {
+  const { w, bytes, me } = await held();
+  const { r, ctx } = record();
+  const agg = fakeAgg(w, { certifyAfter: Infinity, hints: true });
+  await assert.rejects(transfer({ agg: agg.agg }, me, bytes, { publicKey: signer(3).publicKey }, ctx(), FAST), /timed out/);
+  assert.ok(r.pending);
+  assert.equal(r.pending.refused, undefined, 'a timeout is not a refusal: no discard');
+  assert.equal(await probePending(agg.agg, r.pending), 'pending');
+});
+
+test('discard: refused, discarded, then certified after all: the next run meets the conflict, restores the discarded transfer and completes it', async () => {
+  const { w, bytes, me } = await held();
+  const { r, ctx, discard } = record();
+  // the aggregator answers a refusal, but certifies the first request for the state anyway (a few polls later)
+  const agg = fakeAgg(w, { status: 'REQUEST_EXPIRED', certifyAfter: 3 });
+  await assert.rejects(transfer({ agg: agg.agg }, me, bytes, { publicKey: signer(3).publicKey, profile: 'b' }, ctx(), FAST), (e: unknown) => e instanceof RefusedError);
+  assert.equal(r.pending?.refused, 'REQUEST_EXPIRED');
+  const first = r.pending!;
+  assert.equal(await probePending(agg.agg, first), 'none');
+  discard();
+  // Run builds a new transfer (to another key); the aggregator certifies the discarded one: restored and completed
+  const out = await transfer({ agg: agg.agg }, me, bytes, { publicKey: signer(4).publicKey, profile: 'c' }, ctx(), FAST);
+  assert.equal(out.used.cd, first.cd);
+  assert.equal(out.used.toPublicKey, hex(signer(3).publicKey));
+  assert.equal(out.used.toProfile, 'b');
+  assert.equal(r.discarded.length, 0, 'restored out of discarded');
+  assert.equal(r.pending?.cd, first.cd);
+  const v = await w.bridge.verifyNativeTokenBytes(out.bytes, 'receipt');
+  assert.equal(v.outcome.nonce, 1n);
+});
+
+test('discard: a discarded transfer certified while a burn is run is restored as the pending transfer (RestoredError)', async () => {
+  const { w, bytes, me } = await held();
+  const { r, ctx, discard } = record();
+  const agg = fakeAgg(w, { status: 'REQUEST_EXPIRED', certifyAfter: 2 });
+  await assert.rejects(transfer({ agg: agg.agg }, me, bytes, { publicKey: signer(3).publicKey }, ctx(), FAST));
+  const first = r.pending!;
+  discard();
+  const s = { agg: agg.agg, vaultCfg: w.dep.cfg, bridge: w.bridge, trust: w.agg.trust };
+  await assert.rejects(burn(s, me, bytes, `0x${'d0'.repeat(20)}`, ctx(), FAST), (e: unknown) => e instanceof RestoredError && /run transfer/.test(e.message));
+  assert.equal(r.pending?.cd, first.cd);
+  assert.equal(r.pending?.kind, 'transfer');
+  // the transfer step then resumes it: the proof is held, nothing is built
+  const out = await transfer({ agg: agg.agg }, me, bytes, { publicKey: signer(9).publicKey }, { ...ctx(), persist: () => assert.fail('rebuilt') }, FAST);
+  assert.equal(out.used.cd, first.cd);
+});
+
+test('lock: "nonce too high" is not a refusal, and "replaced" needs two reads (a lagging receipt is not a replacement)', async () => {
+  const me = burnerOf(2);
+  const f = fakeEvm(me, { fail: () => new RpcError('eth_sendRawTransaction: nonce too high') });
+  const store = memStore();
+  await assert.rejects(lock({ evm: f.evm, cfg: { vault: VAULT } }, me, 1000n, store), (e: unknown) => e instanceof StillPendingError);
+  assert.ok(store.get());
+  // the nonce read sees the block, the first receipt reads do not (a lagging node); the recheck sees the receipt
+  const p = store.get()!;
+  const g = fakeEvm(me);
+  let reads = 0;
+  const lagging: LockEvm = {
+    ...g.evm,
+    receipt: async (h) => (++reads <= 2 ? null : g.evm.receipt(h)),
+    rpc: async <T>() => '0x1' as T,
+  };
+  g.evm.mineNow(p.hash);
+  const l = await lock({ evm: lagging, cfg: { vault: VAULT } }, me, 1000n, store, { recheckMs: 5 });
+  assert.equal(l.lockTx, p.hash);
 });
 
 // ---- handoff messages ----------------------------------------------------------------------------------------------------------------------

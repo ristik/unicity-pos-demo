@@ -55,12 +55,16 @@ Each step can be run again, or the page reloaded part way through, without losin
 - **Lock:** the signed transaction is stored before `eth_sendRawTransaction`. While it is stored, *Run* polls its hash (rebroadcasting the
   same bytes when it is not mined) and does not send another lock. After any send error the chain decides, not the error: the receipt and
   the account nonce are read again. The lock is cleared only once its receipt is read, or when it provably cannot be mined (its account
-  nonce went to another transaction, or the node refused it outright while the nonce had not moved). A gateway timeout, a wrapped 5xx or
-  "nonce too low" keeps it pending ("still pending, Run again later").
+  nonce went to another transaction, seen on two reads a few seconds apart, or the node refused it outright while the nonce had not moved).
+  A gateway timeout, a wrapped 5xx, "nonce too low" or "nonce too high" keeps it pending ("still pending, Run again later"). The record is
+  also written to IndexedDB (`durability: 'strict'`, awaited) before the broadcast, and put back into localStorage on the next load if only
+  that copy survived.
 - **Transfer and burn:** the transaction (with its random state mask) and its signed certification request are stored on the token record
-  before they are submitted. A retry submits that same request, and never builds a new one. If the aggregator refuses it outright, *discard
-  pending* (with a confirmation) drops it so the token can be spent again. It first checks the aggregator: a request that is certified is
-  never discarded. The dropped request stays on the record (`discarded`).
+  before they are submitted. A retry submits that same request, and never builds a new one. *Discard pending* is offered only after the
+  aggregator explicitly refused the request (never after a timeout). It asks for confirmation, then checks the aggregator again and keeps
+  the request if it is certified or the aggregator's status hint says it is pending. A discarded request stays on the record
+  (`discarded`). If it is certified after all, the next transfer or burn meets the conflict, restores it as the pending transaction and
+  completes it (or, for the other kind, asks to run that step).
 - **Certification:** an existing proof is taken without submitting again. *Already submitted* counts as accepted. A refusal fails with its
   status. A proof that certifies another transaction for the state is an error, and is never stored as this transaction's proof.
 - **Redeem:** when the vault answers `PartAlreadyRedeemed` (an earlier redeem was mined), the step reports *already redeemed*.
@@ -70,6 +74,10 @@ Each step can be run again, or the page reloaded part way through, without losin
 - **hCaptcha runs on the wallet's origin.** The faucet card loads hCaptcha's `api.js` at the top level of `/demo/`, on the same origin whose
   localStorage holds the burner keys (`unicity-demo.*.key`). A compromised or malicious hCaptcha script could read them. The keys are burner
   keys for test value only. A real wallet would isolate the captcha (a separate origin or iframe) or set a CSP.
+- **A hard browser kill right after signing a lock.** localStorage is written lazily: a `kill -9` of the browser within about a second of
+  signing can lose the pending-lock record there (a reload or closing the tab does not). The IndexedDB copy above is committed before the
+  broadcast and covers this where the browser honours `durability: 'strict'`. Where IndexedDB is unavailable, such a kill can still lose
+  the record, and the next *Run* would sign a second lock.
 - **The handoff works only between tabs of one browser** (a `BroadcastChannel`), not between devices.
 
 ## Develop
