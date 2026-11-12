@@ -8,11 +8,8 @@ import './pos.css';
 
 import type { TrustInput } from '@unicitylabs/native-bridge-plugin';
 import { AggregatorClient } from '@unicitylabs/state-transition-sdk/lib/api/AggregatorClient.js';
-import { NetworkId } from '@unicitylabs/state-transition-sdk/lib/api/NetworkId.js';
-import { TRUST_BASE_BUNDLE_LIMITS } from '@unicitylabs/state-transition-sdk/lib/api/bft/trustbase/ReleasePin.js';
-import { TrustBaseBundle } from '@unicitylabs/state-transition-sdk/lib/api/bft/trustbase/TrustBaseBundle.js';
 
-import { abs, fetchTesterConfig, loadSettings } from '../config.js';
+import { abs, loadSettings, pinOverridden } from '../config.js';
 import { fmtUnits, hex, short, sleep } from '../hex.js';
 import { load, save } from '../store.js';
 import { begin, end, installFetchTrace, type Trace } from '../trace.js';
@@ -20,7 +17,7 @@ import { bootstrapTrust, refreshTrust } from '../trust.js';
 import { copyable, explain as explainTrace, h, mono } from '../ui.js';
 import { keccakHex } from './abi.js';
 import { Chain, isZero, show, type CallRecord } from './chain.js';
-import { PARAMS_MS, POLL_MS, posAddresses, queryPin, SLOW_MS, SPACING_MS, TRUST_MS } from './config.js';
+import { PARAMS_MS, POLL_MS, posAddresses, SLOW_MS, SPACING_MS, TRUST_MS } from './config.js';
 import { ASSIGNMENT_STATE, FN, LOT_CATEGORY, REASON, RECORD_KIND, REJECT_AFTER_ROUNDS, RESULT_STATE, type FnName } from './contracts.js';
 import {
   asMembers, clockKey, discover, eligibleMember, ineligibility, rawWeight, readClock, readCommittee, readIdentity, readOpenResult, readParams, readRecord, readResult,
@@ -387,7 +384,7 @@ function identitiesCard(): HTMLElement {
 
 // ---- 4. UTB timeline ---------------------------------------------------------------------------------------------------------------------------
 function utbCard(): HTMLElement {
-  if (!trust) return card('Trust base (UTB) history', errors.has('utb') ? '' : 'loading…', 'wide', errors.has('utb') ? h('p', { class: 'err' }, errors.get('utb')!) : '');
+  if (!trust) return card('Trust base (UTB) history', PIN && !errors.has('utb') ? 'loading…' : '', 'wide', !PIN ? h('p', { class: 'err' }, NO_PIN) : errors.has('utb') ? h('p', { class: 'err' }, errors.get('utb')!) : '');
   const es = trust.history.entries;
   const nameOf = (sigKey: Uint8Array): string => {
     const id = idOfRootKeyHash(keccakHex(`0x${hex(sigKey)}`));
@@ -569,20 +566,18 @@ async function readParamsTier(): Promise<void> {
   logs.params = log;
 }
 
-async function trustPin(): Promise<string> {
-  const pin = queryPin() || settings.trustPin;
-  if (pin) {
-    trustPinSource = queryPin() ? 'the page URL' : 'the build / wallet settings';
-    return pin;
-  }
-  try {
-    const { fileUrl } = await fetchTesterConfig(settings.testerConfig);
-    trustPinSource = 'the operator\'s trust-base.genesis.entryid';
-    return (await (await fetch(fileUrl('trustEntryId'))).text()).trim();
-  } catch {
-    trustPinSource = 'UNPINNED: the genesis entry of the first page (trust on first use)';
-    return '';
-  }
+const NO_PIN = 'This build has no trust pin (VITE_TRUST_PIN, wallet/.env.production), so the UTB history is not loaded: the page does not take '
+  + 'its trust root from the server it shows. Rebuild with the pin, or set one in the wallet\'s Network settings (developer option).';
+/**
+ * The trust pin, as the wallet takes it: the build's VITE_TRUST_PIN, or the Network-settings developer override. Never the server's published
+ * entry id, never the first page's genesis (trust on first use), never the URL. Without one the UTB card says so and nothing is fetched.
+ */
+const PIN = settings.trustPin.trim();
+
+function trustPin(): string {
+  if (!PIN) throw new Error(NO_PIN);
+  trustPinSource = pinOverridden(settings) ? 'DEVELOPER OVERRIDE from the wallet\'s Network settings' : 'the build';
+  return PIN;
 }
 
 async function readTrustTier(): Promise<void> {
@@ -591,13 +586,8 @@ async function readTrustTier(): Promise<void> {
     const agg = new AggregatorClient(abs(settings.aggregator));
     const before = trust?.history.tip?.epoch ?? 0n;
     if (!trust) {
-      let pin = await trustPin();
-      if (!pin) {
-        // trust on first use: the genesis entry of the first page names the pin (said so on the page)
-        const page = await agg.getTrustBasePage({ fromEpoch: 1n, maxEntries: 64, network: NetworkId.fromId(settings.network), snapshot: null });
-        pin = hex(await (await TrustBaseBundle.decode(page, TRUST_BASE_BUNDLE_LIMITS)).entries[0].entryId());
-      }
-      trust = (await bootstrapTrust(agg, pin, settings.network)).trust;
+      // its own storage keys (pos.trust.*): this page never writes the wallet's held history
+      trust = (await bootstrapTrust(agg, trustPin(), settings.network, 'pos.')).trust;
     }
     await refreshTrust(trust, agg);
     for (const e of trust.history.entries) if (!entryIds.has(e.epoch)) entryIds.set(e.epoch, hex(await e.entryId()));
@@ -628,7 +618,7 @@ async function loop(): Promise<void> {
         }
       }
     }
-    if (!trust || now - lastTrust > TRUST_MS) {
+    if (PIN && (!trust || now - lastTrust > TRUST_MS)) {
       if (await tier('utb', readTrustTier)) lastTrust = now;
     }
     render();

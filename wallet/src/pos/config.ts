@@ -2,7 +2,7 @@
  * Where the PoS contracts are. Custody, election and the reward pool are the generation's `network/pos-deployment.json` (the same addresses on
  * tn-pos-staging-20261111 and tn-pos-dev-20261112: the factory deploys deterministically); the registry is the fixed system address. The reader,
  * the evidence module and the policy source are read from the election itself. Overrides: build-time VITE_POS_* or the page's query string
- * (`?custody=0x…&election=0x…&rewardPool=0x…&pin=0x…`).
+ * (`?custody=0x…&election=0x…&rewardPool=0x…`). The trust pin is the wallet's (src/config.ts): there is no `?pin=`.
  */
 import { isAddress } from '../evm.js';
 import type { Addresses } from './chain.js';
@@ -34,9 +34,6 @@ export function posAddresses(): Addresses {
     governance: '',
   };
 }
-
-/** A trust pin from the query string (`?pin=`), when given. */
-export const queryPin = (): string => query().get('pin') ?? '';
 
 /** Poll cadence: the cheap clock every POLL_MS, everything else when it changed or every SLOW_MS (public gateway: ~5 req/s per IP). */
 export const POLL_MS = Number(query().get('poll') ?? env.VITE_POS_POLL_MS ?? 8000);

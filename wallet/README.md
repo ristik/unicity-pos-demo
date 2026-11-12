@@ -55,9 +55,10 @@ The committee arithmetic (`src/pos/rules.ts`: quorum, Quantize, Continuity, Sele
 (`test/fixtures/p85/`, contracts 7b510f6b). Polling is sequential, with requests at least 250 ms apart and backoff on refusals. The page reads
 the clock and pointers every 8 s (`?poll=ms`). It reads everything else when a pointer changes or every 30 s, the trust bases every 20 s,
 and the parameters every 5 min. Immutable views are cached. Contract addresses default to the generation's `pos-deployment.json`. They can be
-overridden by `VITE_POS_CUSTODY/ELECTION/REWARD_POOL` or `?custody=&election=&rewardPool=`. The trust pin comes from `?pin=`, then the wallet
-settings or `VITE_TRUST_PIN`, then the operator's tester-config. If none of these is set, the page takes the first page's genesis and labels
-the history UNPINNED.
+overridden by `VITE_POS_CUSTODY/ELECTION/REWARD_POOL` or `?custody=&election=&rewardPool=`. The trust pin is the wallet's:
+`VITE_TRUST_PIN` from the build, or the wallet's Network-settings developer override, which the page labels as such. It is never taken from
+the server or the URL. Without a pin, the UTB card says so and loads nothing. The page keeps its history under its own storage keys
+(`unicity-demo.<profile>.pos.trust.*`), so it never writes the wallet's.
 
 ## Configuration
 
