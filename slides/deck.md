@@ -26,11 +26,19 @@ Live demo on `pos.staging.unicity.network`
 ## What we'll show
 
 1. **The setup**: what runs on the staging network, its endpoints and repos.
-2. **Assets demo**: UCT from the faucet → bridged to a Unicity token → sent to a phone → bridged back.
+2. **Assets demo**: UCT from the faucet → bridged to a Unicity token → sent to a second wallet (another tab) → bridged back.
 3. **PoS demo**: committee, stakes and quorum, live. Then this laptop **joins as a validator**, an old validator **retires**, and an old token **still verifies**.
 4. **How it works underneath**: contracts, logical validator, bridge vs bridging to an external chain.
 
 Everything in the demo runs in a browser: no install, a burner key, public endpoints only.
+
+---
+
+<!-- _class: lead -->
+
+# Background
+
+the stack · contracts · bridge · tested limits · what we fixed upstream
 
 ---
 
@@ -109,7 +117,7 @@ Not public: root/shard admin, authority, Engine API, Prometheus.
 | `ristik/bft-go-base` | shared Go types, trust-base codecs | `integration/enshrined-evm` |
 | `ristik/unicity-pos-demo` | this wallet, visualizer and slides | `main` |
 
-Forks keep `main` as the upstream-sync branch. UTB v2 is being upstreamed: bft-go-base, unicity-ids and Java are merged; JS #206 and Rust #73 merged 2026-11-11.
+Forks keep `main` as the upstream-sync branch. UTB v2 is merged upstream: bft-go-base#20 (2026-11-09); aggregator-go#273, sdk-js#206, sdk-rust#73, sdk-java#101 (2026-11-11); unicity-ids#11 (2026-11-09).
 
 ---
 
@@ -117,16 +125,17 @@ Forks keep `main` as the upstream-sync branch. UTB v2 is being upstreamed: bft-g
 
 | Step | Call |
 |---|---|
-| fund | `POST /api/claim` {address, hCaptcha token} |
-| balances, contracts | `eth_call`, `eth_getLogs`, `eth_sendRawTransaction` on `/rpc` |
-| lock | `BridgeVault.lock(...)` |
-| lock proof | `eth_getProof` + block header + UC of that block |
-| mint / transfer | aggregator `submit_commitment`, `get_inclusion_proof` |
-| verify | SDK `TrustBaseHistory` + `/api/v1/trustbases` (only fetch) |
-| redeem | `BridgeVault.redeem(history, UCs)` → precompile `0x0105` |
-| PoS view | `StakeCustody` / `ElectionPolicy` views + events |
+| fund | faucet `POST /api/claim` {address, hCaptcha token}; `GET /api/network` |
+| EVM reads/writes | `/rpc`: `eth_call`, `eth_estimateGas`, `eth_sendRawTransaction`, `eth_getTransactionReceipt`, `eth_getTransactionCount`, `eth_gasPrice`, `eth_getBalance`, `eth_getBlockByNumber`, `eth_getCode` |
+| lock | `BridgeVault.lock(bytes)` |
+| lock proof | `GET /lockproof/v1/lockproof?block=&nonce=` (EVM UC + header + MPT proof; built server-side) |
+| mint / transfer / burn | aggregator `submitCertificationRequest`, `getInclusionProof` |
+| trust | `getTrustBasePage` → local `TrustBaseHistory`, refreshed on `ErrNoEntryForEpoch` |
+| return proof | aggregator consolidation: the burned token's proofs under **one** seal |
+| redeem / claim | `BridgeVault.redeem(bytes)` → precompile `0x0105`; then `claim(uint256,address)` |
+| PoS view | `eth_call` views only: `StakeCustody`, `ElectionPolicy`, `SealRegistry` record log |
 
-<!-- TODO(verify): exact method names once the wallet is wired; fill from research-assets. -->
+The public `/rpc` is allow-listed: no `eth_getLogs`, no `eth_getProof`, no batches. The visualizer rebuilds history from the registry record log.
 
 ---
 
@@ -207,9 +216,12 @@ Not offences: duplicate or re-encoded statements, different rounds, absence from
 ## A logical validator, and how it joins
 
 ```
-laptop (colima) ──ssh -R──▶ staging host
-  root · shard · authority · ureth  (one docker "pod")
+laptop (colima, pod5)                       staging host
+ root5 · shard5 · authority5 · ureth5
+   peer stubs root1-4 / shard1-4 / ureth1-4 ─ssh -L─▶ root1-4:8000, shard1-4:9000, ureth1-4:8545
+   root5:8000, shard5:9000, agent :28700   ◀─ssh -R─  laptop-relay container (validators net)
 ```
+One `ssh -N`, no listener on the host (`GatewayPorts no` stays). Peer ports are libp2p, authenticated by peer id.
 
 1. Generate keys: root key, signing keys, EVM key.
 2. `StakeCustody.register(rootKey, pop, withdrawal)`
@@ -218,7 +230,7 @@ laptop (colima) ──ssh -R──▶ staging host
 5. Next election → `submitAssignmentPoPs` → handoff → **new UTB entry**
 6. Leave: `requestRetirement(id)` → excluded at the next election → `mature` → `claim`
 
-<!-- TODO(verify): ports and the tunnel layout from research-pos. -->
+Keys stay in the laptop's memory: sleep the laptop or restart colima and that validator is gone. Late joiners replay the chain (~4 blocks/s).
 
 ---
 
@@ -231,7 +243,7 @@ laptop (colima) ──ssh -R──▶ staging host
 5. **Redeem**: anyone submits the history + UCs. `0x0105` verifies it natively and the vault credits the recipient.
 6. **Claim**: pull payment. Invariant `paid ≤ credited ≤ locked`.
 
-The receiver verifies **offline**: the token + local UTB history, no RPC.
+The receiver verifies **locally**: the token + its UTB history. No EVM RPC; the only fetch is newer trust-base entries, each checked against its predecessor.
 
 ---
 
@@ -252,11 +264,91 @@ The burn side is final at once on both. The hard part is a weak verifier, and he
 
 ---
 
+<!-- _class: small -->
+
+## Tested limits (one server, one operator)
+
+| What | Result |
+|---|---|
+| **16 / 32 / 64 roots** | all controls pass: progress, rejoin, quorum-minus-one stall, resume (34–38 rounds/min) |
+| **128 roots** | "can pass, not reliably": all controls passed in 4/7 fresh runs. The stall at quorum−1 always holds; **resume** after quorum returns is what fails (#982 open). Load average up to 159 on 12 cores |
+| where the CPU goes at 128 | 81–94 % secp256k1 verification. Timeout messages are 83–85 % of loop time and O(n²): 16,256 sends per round. Caches #984/#992 cut per-message cost 10–40×, but storms remain |
+| committee ceiling **16** | a gas/pricing ceiling (precompiles, registry), not consensus: native bounds are 256. The PoS package caps elected members at 6 |
+| election hook gas | 5.4 M at 16 candidates → 64.6 M at 128 candidates / 32 elected (52 % of system gas) |
+| UC verification | ≈1.275 M gas/UC before repricing → **≈124 k** after; 16-member, 16-sig UC ≈217 k |
+| bridge redemption | 1,000 leaves: 1.45 MB, 48 M gas, 389 ms native → 60 M block capacity, 2 MiB envelope |
+| round-time tail | 0.28 % of rounds > 1 s (max 1.86 s), planning envelope ρ = 2.3 s; leader rescue < 75 s in 12/12 windows |
+| archive growth | ≈6.4 KiB per EVM block |
+
+Not covered yet: WAN, a second operator, live unequal weights, sustained load, multi-host.
+
+---
+
+## A limit we found this week: staging stall
+
+- `tn-pos-staging-20261111` ran **≈20 h**, then stopped at EVM block 42,832.
+- **Memory:** each 512 MiB shard container filled with ≈490 MiB of kernel inode/dentry cache from the archive's **one-directory-per-block** layout (471 k files per validator). The shards swapped, block rate fell from 2,800/h to 340/h, and one validator dropped out.
+- **Wedge:** with 3 of 4 left, every failed round journaled another candidate at the same height. At the cap of 32, every proposal was refused, permanently.
+- **Fixes:**
+  - sizing 2 GiB / 1.5 CPU / 256 (#1020);
+  - evict superseded same-height candidates (#1019);
+  - pack the archive layout.
+
+Lesson: the roots and aggregator stayed healthy the whole time. The weak spot was resource sizing at the EVM shard.
+
+---
+
+<!-- _class: small -->
+
+## Fixes and improvements on top of upstream (not PoS)
+
+**Correctness and liveness**
+- **Root consensus permanent stall:** `ProcessTc` deleted a block that a late QC still certified. Fixed and **merged upstream** (bft-core#27, issue #25).
+- Recovery bound to the committed root, configuration and last responses; null-safe `StateMsg`. Merged upstream: bft-core#48/#50/#51/#46, bft-go-base#19.
+- Fork-only, upstream has the same code path:
+  - bare-QC recovery targets the certified block (#660, upstream issue #52);
+  - no second timeout vote after recovery (#583);
+  - restart after a TC or an abandoned fork (#578);
+  - monotonic UC seal time (#447/#479);
+  - re-send lost certification requests (#666).
+- EVM shard: 3-of-4 livelock (#728); crash recovery from the archive (#843); paged rejoin (#769).
+
+**Performance**
+- Verified QC/TC cache: 78–99 % hit rate at 128 roots (#992). Timeout replay cache, 10–40× (#984).
+- UC-consolidation work made asymptotically cheaper in Go, the aggregator and the SDKs. Merged upstream: bft-go-base#9, bft-core#33, aggregator-go#208, sdk-js/rust.
+- Journal load memo: whole-journal re-verification no longer repeats about 5 times a second (#749).
+
+---
+
+<!-- _class: small -->
+
+## Fixes and improvements on top of upstream (cont.)
+
+**Robustness and operability**
+- Aggregator certification intake: admitted root peers only, authenticate before liveness, bounded catch-up. Merged upstream (aggregator-go#246/#249).
+- Aggregator/SDK: 503 + Retry-After, long-poll proof reads, request timeouts, high-S rejected. Merged upstream.
+- Bounded resources: frame limits, archive fsync and stream caps (#953/#993/#957). Peer admission (upstream bft-core#42, open).
+- Diagnostics: consensus-loop profile, resource collector, pending-work view.
+
+**Protocol and format, of general use**
+- **Trust Base v2**: signed trust-base history with weighted quorum; `/api/v1/trustbases`; SDK 4.0 in JS/Rust/Java. **Merged upstream 2026-11-09 to 11-11** (bft-go-base#20; aggregator-go#273, sdk-js#206, sdk-rust#73, sdk-java#101).
+- **UC consolidation** and **non-inclusion proofs**, across all repos. Merged upstream.
+- Strict recoverable secp256k1 verification (recovery ID bound to the key) in Go and all SDKs.
+- Native bounds raised to 256 members / 256 signatures. Roots re-verify RSMT consistency before voting (#547).
+
+**Upstream PRs by this effort:**
+
+| bft-core | bft-go-base | aggregator-go | sdk-js | sdk-rust | sdk-java |
+|---|---|---|---|---|---|
+| 22 | 11 | 78 | 52 | 51 | 15 |
+
+---
+
 <!-- _class: lead -->
 
 # Demo 1: assets
 
-faucet → lock → mint → send to a phone → burn → redeem → claim
+faucet → lock → mint → send to tab B → burn → redeem → claim
 
 ---
 
