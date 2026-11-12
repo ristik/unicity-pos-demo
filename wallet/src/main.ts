@@ -143,6 +143,8 @@ interface StepDef {
   input?: () => HTMLElement;
   /** a line under the step about what a Run will do (a pending transaction it resumes) */
   note?: (t: TokenRecord | undefined) => string | undefined;
+  /** the pending transaction kind this step resumes: its row offers "discard pending" */
+  resumes?: 'transfer' | 'burn';
   run: () => Promise<string>;
 }
 
@@ -194,6 +196,7 @@ const STEPS: StepDef[] = [
     key: 'transfer', title: 'Transfer to another tab', phase: 'minted', what: 'A certified transfer to the other tab\'s public key, then the token file goes over a BroadcastChannel. The receiver stores it, then verifies it offline.',
     input: () => h('span', {}, peerSelect, ' ', h('button', { class: 'link', onclick: () => window.open(`?w=${PROFILE === 'b' ? 'a' : 'b'}`, '_blank') }, `open tab ${PROFILE === 'b' ? 'A' : 'B'}`)),
     note: (t) => resumes(t, 'transfer') && `${resumes(t, 'transfer')} Its recipient is tab ${t?.to?.toUpperCase()}.`,
+    resumes: 'transfer',
     run: async () => {
       const t = currentOr('select a token');
       const resume = t.pending?.kind === 'transfer' ? t.pending : undefined;
@@ -230,6 +233,7 @@ const STEPS: StepDef[] = [
     key: 'burn', title: 'Burn for return', phase: 'minted', what: 'A transfer to BurnPredicate(sha256(reason)); the reason names the EVM recipient and the amount the vault will credit.',
     input: () => recipientInput,
     note: (t) => resumes(t, 'burn') && `${resumes(t, 'burn')} Its recipient is ${t?.pending?.recipient}.`,
+    resumes: 'burn',
     run: async () => {
       const t = currentOr('select a token');
       const to = t.pending?.kind === 'burn' ? need(t.pending.recipient, 'the pending burn has no recipient') : recipientInput.value.trim() || me.evmAddress;
@@ -380,9 +384,31 @@ function stepRow(d: StepDef, t: TokenRecord | undefined): HTMLElement {
       h('button', { disabled: !enabled, onclick: () => void step(d.key, d.run) }, busy === d.key ? 'running…' : 'Run'),
       st ? h('span', { class: st.ok ? 'msg' : 'msg bad' }, st.text) : ''),
     h('p', { class: 'what' }, d.what),
-    d.note?.(t) ? h('p', { class: 'warn' }, d.note(t)!) : '',
+    d.note?.(t) ? h('p', { class: 'warn' }, d.note(t)!,
+      d.resumes && t?.pending?.kind === d.resumes ? h('button', { class: 'link', disabled: !!busy || !session, onclick: () => discardPending(t.id, d.key) }, 'discard pending') : '') : '',
     drawer(d.key));
 }
+/**
+ * Drop a stored transfer or burn the aggregator will not certify (a refusal), so the token can be spent again. Asks first, then probes the
+ * aggregator: a request that is certified (for this transaction or another) is never discarded. The dropped request stays on the record.
+ */
+function discardPending(id: string, key: string): void {
+  const t = getToken(id);
+  const p = t?.pending;
+  if (!p) return;
+  if (!confirm(`Discard the pending ${p.kind}? Only do this when the aggregator refused it. The aggregator is checked first: if the ${p.kind} `
+    + 'is certified it is kept. After a discard, Run builds a new transaction.')) return;
+  const why = status.get(key)?.text ?? 'discarded by the user';
+  void step(key, async () => {
+    const r = await bridge.probePending(sess().agg, p);
+    fact('probe', r === 'none' ? 'no proof for this state id' : r === 'ours' ? 'certified for this transaction' : 'certified for another transaction');
+    if (r === 'ours') throw new Error(`the ${p.kind} is certified: not discarded; Run finishes it`);
+    if (r === 'other') throw new Error(`the token's state is certified for another transaction: this token is spent elsewhere; the pending ${p.kind} is kept for the record`);
+    patchToken(id, { pending: undefined, discarded: [...(t.discarded ?? []), { ...p, discardedAt: Date.now(), why }] });
+    return `discarded the pending ${p.kind}: Run builds a new one`;
+  });
+}
+
 /** What a finished step left on the token record. */
 const DONE: Record<string, (t: TokenRecord) => boolean> = {
   lock: (t) => !!t.lockTx, lockproof: (t) => !!t.lockProof, mint: (t) => !!t.tokenId && !t.from, transfer: (t) => t.phase === 'sent' || (!!t.to && !t.pending),

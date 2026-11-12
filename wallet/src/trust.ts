@@ -26,22 +26,28 @@ export interface EntryView {
   members: { nodeId: string; weight: bigint; key: string }[];
 }
 
+/** The storage prefix each held history persists under ('' for the wallet; another page passes its own, so it never writes the wallet's keys). */
+const namespaces = new WeakMap<TrustInput, string>();
+
 const persist = async (trust: TrustInput): Promise<void> => {
-  save('trust.bundle', hex(await trust.history.toBundle()));
-  save('trust.pin', hex(trust.id));
+  const ns = namespaces.get(trust) ?? '';
+  save(`${ns}trust.bundle`, hex(await trust.history.toBundle()));
+  save(`${ns}trust.pin`, hex(trust.id));
 };
 
 /**
  * The held history: the stored bundle when it is under the same pin, else fetched from the aggregator from epoch 1. A complete first page
  * decodes as a bundle; otherwise the SDK's updater pages through from the genesis.
  */
-export async function bootstrapTrust(agg: AggregatorClient, pinHex: string, network: number): Promise<{ trust: TrustInput; source: 'stored' | 'fetched' }> {
+export async function bootstrapTrust(agg: AggregatorClient, pinHex: string, network: number, ns = ''): Promise<{ trust: TrustInput; source: 'stored' | 'fetched' }> {
   const pin = unhex(pinHex);
   if (pin.length !== 32) throw new Error('the trust pin must be a 32-byte genesis EntryID');
-  const stored = load('trust.bundle');
-  if (stored && load('trust.pin') === hex(pin)) {
+  const stored = load(`${ns}trust.bundle`);
+  if (stored && load(`${ns}trust.pin`) === hex(pin)) {
     try {
-      return { trust: await TrustInput.fromBundle(unhex(stored), pin), source: 'stored' };
+      const trust = await TrustInput.fromBundle(unhex(stored), pin);
+      namespaces.set(trust, ns);
+      return { trust, source: 'stored' };
     } catch {
       /* a stale or damaged copy: fetch again */
     }
@@ -55,6 +61,7 @@ export async function bootstrapTrust(agg: AggregatorClient, pinHex: string, netw
     await TrustBaseUpdater.update(history, [agg], { network: net, limits: { ...TRUST_BASE_PAGE_LIMITS, maxEntries: 64 } });
     trust = await TrustInput.fromBundle(await history.toBundle(), pin);
   }
+  namespaces.set(trust, ns);
   await persist(trust);
   return { trust, source: 'fetched' };
 }
