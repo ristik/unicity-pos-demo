@@ -14,8 +14,10 @@ A minimal in-browser wallet for the Unicity PoS demo: Vite + TypeScript, no fram
   return proof → redeem → claim. Each step on the page has an *explain* drawer. It shows the requests the step made (method, path, status, sizes,
   timings, and the last few raw bodies) and the step's own facts: tx hashes, proof and token sizes, seal epoch and round.
 - **Two-tab handoff** (`src/handoff.ts`): *open tab B* opens `?w=b`, a second wallet with its own key and storage. The two tabs find each other over a
-  BroadcastChannel. The sender transfers the token to the other tab's key and posts the token file. The receiver verifies it offline
-  (`verifyNativeTokenBytes(…, 'receipt')`) and checks that it is the current owner. *send 0.001 UCT gas to tab B* funds the other tab's redeem and
+  BroadcastChannel. The sender transfers the token to the other tab's key, stores the token as *sent*, and posts the token file; *Resend*
+  posts it again if the other tab was closed or missed it. The receiver stores the file the moment it arrives (as *received, not verified*),
+  then verifies it offline (`verifyNativeTokenBytes(…, 'receipt')`) and checks that it is the current owner as soon as the page is connected
+  and free. *Verify received token* retries it. Messages that are not well formed are dropped. *send 0.001 UCT gas to tab B* funds the other tab's redeem and
   claim.
 - **Trust base** (`src/trust.ts`): the UTB history, bootstrapped from `/api/v1/trustbases` under a pinned genesis EntryID and persisted. Each later
   entry is authenticated by its predecessor. *Refresh* fetches newer epochs, and the table lists epoch, EntryID, start/end round, members, weights
@@ -68,10 +70,33 @@ Endpoints default to same-origin paths. The *Network settings* panel overrides t
 | `lockproof` | `/lockproof` | lock-proof endpoint, as `GET <lockproof>/v1/lockproof?block=&nonce=` |
 | `faucet` | `/api` | faucet API: `<faucet>/network`, `<faucet>/claim` |
 | `testerConfig` | `/bridge/tester-config.json` | the operator-published bridge config. Its files (EVM PDR, deployment document, genesis EntryID) are read relative to it. |
-| `trustPin` | `VITE_TRUST_PIN` at build time | the genesis EntryID. When it is empty, the operator's `trust-base.genesis.entryid` is used, which is weaker because it comes from the same server. |
+| `trustPin` | `VITE_TRUST_PIN` at build time (`.env.production`) | the genesis EntryID that the trust history starts from. It is never taken from the server: without a pin, the page says so and does not connect. Setting it here is a developer override, and the page shows a banner while it is in use. |
 | `network` | `VITE_NETWORK_ID` or 3 | the root network id, needed only when the first trust-base page is not a complete bundle |
 
 The page checks that the RPC's block 0 is the `genesisHash` in tester-config.json, and that the vault has code, before anything is sent.
+
+`.env.production` holds the build configuration for `https://pos.staging.unicity.network/demo/`. Everything in it is public: the trust pin
+(the generation's `utb.genesis_id`) and contract addresses. `npm run build` reads it. A new network generation needs a new pin there.
+
+## Retries and reloads
+
+Each step can be run again, or the page reloaded part way through, without losing the lock or the token:
+
+- **Lock:** the signed transaction is stored before `eth_sendRawTransaction`. While it is stored, *Run* polls its hash (rebroadcasting the
+  same bytes when it is not mined) and does not send another lock. It is cleared once the receipt is read, or when it can no longer be mined
+  (the node refused it, or its account nonce went to another transaction).
+- **Transfer and burn:** the transaction (with its random state mask) and its signed certification request are stored on the token record
+  before they are submitted. A retry submits that same request, and never builds a new one.
+- **Certification:** an existing proof is taken without submitting again. *Already submitted* counts as accepted. A refusal fails with its
+  status. A proof that certifies another transaction for the state is an error, and is never stored as this transaction's proof.
+- **Redeem:** when the vault answers `PartAlreadyRedeemed` (an earlier redeem was mined), the step reports *already redeemed*.
+
+## Limitations
+
+- **hCaptcha runs on the wallet's origin.** The faucet card loads hCaptcha's `api.js` at the top level of `/demo/`, on the same origin whose
+  localStorage holds the burner keys (`unicity-demo.*.key`). A compromised or malicious hCaptcha script could read them. The keys are burner
+  keys for test value only. A real wallet would isolate the captcha (a separate origin or iframe) or set a CSP.
+- **The handoff works only between tabs of one browser** (a `BroadcastChannel`), not between devices.
 
 ## Develop
 
@@ -108,7 +133,7 @@ address another way, for example a transfer from an operator account done on the
 ```sh
 # 1. tunnels to the server's loopback ports (see above) and a local copy of the generation's bridge/public/
 ssh -f -N -L 18545:127.0.0.1:8545 -L 18088:127.0.0.1:8088 -L 18090:127.0.0.1:8090 <server>
-# 2. build with the generation's trust pin (its manifest's utb.genesis_id), serve it with the dev routes
+# 2. build (.env.production has the staging pin; for another generation, pass its manifest's utb.genesis_id), serve it with the dev routes
 VITE_TRUST_PIN=<genesis entry id> npm run build
 BRIDGE_DIR=./bridge-public npx vite preview --port 4173 &
 # 3. print tab A's address, then fund it (below)

@@ -12,6 +12,7 @@ import {
 import { AggregatorClient } from '@unicitylabs/state-transition-sdk/lib/api/AggregatorClient.js';
 import { CertificationData } from '@unicitylabs/state-transition-sdk/lib/api/CertificationData.js';
 import type { InclusionProof } from '@unicitylabs/state-transition-sdk/lib/api/InclusionProof.js';
+import type { TokenRecord } from './tokens.js';
 import { NetworkId } from '@unicitylabs/state-transition-sdk/lib/api/NetworkId.js';
 import { StateId } from '@unicitylabs/state-transition-sdk/lib/api/StateId.js';
 import { ShardRouting } from '@unicitylabs/state-transition-sdk/lib/consolidation/ShardRouting.js';
@@ -29,7 +30,7 @@ import { TokenType } from '@unicitylabs/state-transition-sdk/lib/transaction/Tok
 import { TransferTransaction } from '@unicitylabs/state-transition-sdk/lib/transaction/TransferTransaction.js';
 
 import { abs, fetchTesterConfig, type Settings, type TesterConfig } from './config.js';
-import { calldata, decBytes, encAddress, encBytes, encUint, Evm, HttpError, LOCKED_TOPIC, type Receipt } from './evm.js';
+import { alreadyKnown, calldata, decBytes, encAddress, encBytes, encUint, Evm, HttpError, LOCKED_TOPIC, revertName, RpcError, type Receipt } from './evm.js';
 import { hex, sleep, unhex, waitFor } from './hex.js';
 import type { Burner } from './keys.js';
 import { fact } from './trace.js';
@@ -74,13 +75,50 @@ export const amountBytes = (wei: bigint): Uint8Array => {
   return unhex(h.length % 2 ? `0${h}` : h);
 };
 
-/** Submit one certification request and wait for its inclusion proof. */
-async function certify(agg: AggregatorClient, cd: CertificationData, what: string): Promise<InclusionProof> {
+/** The aggregator calls certify uses (a fake in the tests). */
+export type Certifier = Pick<AggregatorClient, 'submitCertificationRequest' | 'getInclusionProof'>;
+
+/** The state is certified, but for another transaction: this one can never be certified. Not retryable. */
+export class ConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConflictError';
+  }
+}
+
+/** True when the proof certifies exactly this request (same source state, same transaction hash). */
+export const proofIsFor = (proof: InclusionProof, cd: CertificationData): boolean =>
+  proof.certificationData.sourceStateHash.equals(cd.sourceStateHash) && proof.certificationData.transactionHash.equals(cd.transactionHash);
+
+/**
+ * Certify one request and return its inclusion proof. Safe to call again with the same request: a proof already present is taken
+ * (a retry after the proof arrived), "already submitted" counts as accepted, and every proof is checked to certify this transaction.
+ */
+export async function certify(agg: Certifier, cd: CertificationData, what: string, opts: { timeoutMs?: number; everyMs?: number } = {}): Promise<InclusionProof> {
   const sid = await StateId.fromCertificationData(cd);
   const t0 = performance.now();
-  await agg.submitCertificationRequest(cd);
-  const proof = await waitFor(`${what} to be certified`, 180_000, async () => (await agg.getInclusionProof(sid)).inclusionProof ?? undefined, 1000);
+  const check = (proof: InclusionProof): InclusionProof => {
+    if (!proofIsFor(proof, cd)) {
+      throw new ConflictError(`${what}: the state is certified for another transaction (${hex(proof.certificationData.transactionHash.data).slice(0, 16)}…, `
+        + `not ${hex(cd.transactionHash.data).slice(0, 16)}…); this one can never be certified`);
+    }
+    return proof;
+  };
   fact(`${what}: state id`, hex(sid.data));
+  fact(`${what}: transaction hash`, hex(cd.transactionHash.data));
+  const held = (await agg.getInclusionProof(sid)).inclusionProof;
+  if (held) {
+    fact(`${what}: submit`, 'skipped: the state is already certified');
+  } else {
+    const r = await agg.submitCertificationRequest(cd);
+    fact(`${what}: submit`, r.status);
+    if (!r.isAccepted && !r.isStateIdQueued) {
+      // a refusal; an unknown status means "not accepted", so look once for a proof before giving up
+      const late = (await agg.getInclusionProof(sid)).inclusionProof;
+      if (!late) throw new Error(`${what}: the aggregator refused the request: ${r.status}`);
+    }
+  }
+  const proof = check(held ?? await waitFor(`${what} to be certified`, opts.timeoutMs ?? 180_000, async () => (await agg.getInclusionProof(sid)).inclusionProof ?? undefined, opts.everyMs ?? 1000));
   fact(`${what}: certified in`, `${Math.round(performance.now() - t0)} ms`);
   fact(`${what}: inclusion proof`, `${proof.toCBOR().length} bytes CBOR, seal epoch ${proof.unicityCertificate.unicitySeal.epoch}, round ${proof.unicityCertificate.unicitySeal.rootChainRoundNumber}`);
   return proof;
@@ -97,21 +135,67 @@ export function appendTransaction(tokenBytes: Uint8Array, tx: Uint8Array, proof:
 // ---- 1. lock --------------------------------------------------------------------------------------------------------------------------------
 export interface Lock { nonce: bigint; amountWei: bigint; lockTx: string; lockBlockHash: string; blockNumber: bigint }
 
-/** BridgeVault.lock(bytes p0) payable: p0 is the owner predicate the token will be minted to. The nonce is in the receipt's Locked log. */
-export async function lock(s: Session, me: Burner, amountWei: bigint): Promise<Lock> {
-  if (amountWei <= 0n || amountWei >= 1n << 64n) throw new Error('one lock carries 1 to 2^64-1 wei');
-  const data = calldata('lock(bytes)', encBytes(me.predicate));
-  const sent = await s.evm.send(me.secret, { to: s.cfg.vault, data, value: amountWei });
-  fact('tx', sent.hash);
-  fact('calldata', `${data.length} bytes (p0 = owner predicate, ${me.predicate.length} bytes)`);
-  fact('signed tx', `${(sent.raw.length - 2) / 2} bytes, gas limit ${sent.gas}, gas price ${sent.gasPrice}`);
-  const rc = await s.evm.waitReceipt(sent.hash);
-  if (rc.status !== '0x1') throw new Error(`${rc.transactionHash} reverted`);
+/** A signed lock transaction not yet seen in a receipt: kept (localStorage) before it is broadcast, so it is polled, never sent twice. */
+export interface PendingLock { hash: string; raw: string; txNonce: string; amountWei: string; at: number }
+export interface PendingLockStore { get(): PendingLock | null; put(p: PendingLock): void; clear(): void }
+/** What lock needs of the EVM (a fake in the tests). */
+export type LockEvm = Pick<Evm, 'sign' | 'broadcast' | 'receipt' | 'waitReceipt' | 'rpc'>;
+
+/**
+ * BridgeVault.lock(bytes p0) payable: p0 is the owner predicate the token will be minted to. The nonce is in the receipt's Locked log.
+ * The signed transaction is stored before it is broadcast. While one is stored, a call resumes it (rebroadcasts the same bytes and polls
+ * its hash) and ignores `amountWei`: a second lock is never sent while one is pending. The store is cleared once the receipt is read, or when
+ * the transaction can no longer be mined (refused by the node, or its account nonce taken by another transaction).
+ */
+export async function lock(s: { evm: LockEvm; cfg: Pick<TesterConfig, 'vault'> }, me: Burner, amountWei: bigint, store: PendingLockStore, opts: { timeoutMs?: number } = {}): Promise<Lock & { resumed: boolean }> {
+  let p = store.get();
+  const resumed = !!p;
+  if (p) {
+    fact('resuming the pending lock', `${p.hash} (${p.amountWei} wei, signed ${new Date(p.at).toISOString()})`);
+    if (!(await s.evm.receipt(p.hash))) {
+      const used = BigInt(await s.evm.rpc<string>('eth_getTransactionCount', [me.evmAddress, 'latest']));
+      if (used > BigInt(p.txNonce) && !(await s.evm.receipt(p.hash))) {
+        store.clear();
+        throw new Error(`the pending lock ${p.hash} was not mined and its account nonce ${p.txNonce} is used by another transaction: nothing was locked by it, Run locks again`);
+      }
+      try {
+        await s.evm.broadcast(p.raw);
+      } catch (e) {
+        if (e instanceof RpcError) {
+          store.clear();
+          throw new Error(`the node refuses the pending lock ${p.hash} (${e.message}): it was not locked; Run locks again`);
+        }
+        throw e;
+      }
+    }
+  } else {
+    if (amountWei <= 0n || amountWei >= 1n << 64n) throw new Error('one lock carries 1 to 2^64-1 wei');
+    const data = calldata('lock(bytes)', encBytes(me.predicate));
+    const signed = await s.evm.sign(me.secret, { to: s.cfg.vault, data, value: amountWei });
+    p = { hash: signed.hash, raw: signed.raw, txNonce: signed.nonce.toString(), amountWei: amountWei.toString(), at: Date.now() };
+    store.put(p);
+    fact('tx', signed.hash);
+    fact('calldata', `${data.length} bytes (p0 = owner predicate, ${me.predicate.length} bytes)`);
+    fact('signed tx', `${(signed.raw.length - 2) / 2} bytes, gas limit ${signed.gas}, gas price ${signed.gasPrice}, account nonce ${signed.nonce}`);
+    try {
+      await s.evm.broadcast(signed.raw);
+    } catch (e) {
+      // a JSON-RPC error is the node's refusal: nothing is pending. Anything else (network, HTTP) may have reached it: keep it to poll
+      if (e instanceof RpcError && !alreadyKnown(e.message)) store.clear();
+      throw e;
+    }
+  }
+  const rc = await s.evm.waitReceipt(p.hash, opts.timeoutMs);
+  if (rc.status !== '0x1') {
+    store.clear();
+    throw new Error(`${rc.transactionHash} reverted: nothing was locked`);
+  }
   const log = rc.logs.find((l) => l.address.toLowerCase() === s.cfg.vault.toLowerCase() && l.topics[0] === LOCKED_TOPIC);
   if (!log) throw new Error(`${rc.transactionHash} has no Locked event of the vault`);
   const nonce = BigInt(log.topics[1]);
   fact('Locked event', `nonce ${nonce}, block ${BigInt(rc.blockNumber)}, gas used ${BigInt(rc.gasUsed)}`);
-  return { nonce, amountWei, lockTx: rc.transactionHash, lockBlockHash: rc.blockHash, blockNumber: BigInt(rc.blockNumber) };
+  store.clear();
+  return { nonce, amountWei: BigInt(p.amountWei), lockTx: rc.transactionHash, lockBlockHash: rc.blockHash, blockNumber: BigInt(rc.blockNumber), resumed };
 }
 
 // ---- 2. lock proof --------------------------------------------------------------------------------------------------------------------------
@@ -130,7 +214,7 @@ export async function fetchLockProof(s: Session, l: Pick<Lock, 'nonce' | 'lockBl
 
 // ---- 3. mint ---------------------------------------------------------------------------------------------------------------------------------
 /** Check the vault's lockDigest(nonce) is ours, then certify a mint whose justification is the lock proof. Returns the token file. */
-export async function mint(s: Session, me: Burner, l: Lock, lockProof: Uint8Array): Promise<Uint8Array> {
+export async function mint(s: Session, me: Burner, l: Lock, lockProof: Uint8Array): Promise<{ bytes: Uint8Array; tokenId: string }> {
   const { vaultCfg, dep } = s;
   const amount = amountBytes(l.amountWei);
   const salt = deriveSalt(dep.cfgHash, l.nonce);
@@ -147,31 +231,56 @@ export async function mint(s: Session, me: Burner, l: Lock, lockProof: Uint8Arra
   const bytes = C.encodeTag(TOKEN_TAG, arr(u(2), arr(tx.toCBOR(), proof.toCBOR()), arr()));
   const v = await withTrust(s, () => s.bridge.verifyNativeTokenBytes(bytes, 'receipt'));
   fact('token', `${bytes.length} bytes, id ${hex(v.outcome.tokenId)}`);
-  return bytes;
+  return { bytes, tokenId: hex(v.outcome.tokenId) };
 }
 
-// ---- 4. transfer -----------------------------------------------------------------------------------------------------------------------------
-/** A certified transfer to another owner's public key; the file grows by [tx, proof]. */
-export async function transfer(s: Session, me: Burner, bytes: Uint8Array, toPublicKey: Uint8Array): Promise<Uint8Array> {
-  const token = await Token.fromCBOR(bytes);
-  const tx = await TransferTransaction.create(token, SignaturePredicate.create(toPublicKey), StateMask.generate());
-  const proof = await certify(s.agg, await CertificationData.fromTransaction(tx, await SignaturePredicateUnlockScript.create(tx, me.signer)), 'transfer');
-  const out = appendTransaction(bytes, tx.toCBOR(), proof.toCBOR());
+// ---- 4./5. transfer and burn: built once, persisted, then certified --------------------------------------------------------------------------
+/**
+ * A transfer or burn transaction as built (its random state mask is inside the transaction bytes), with its signed certification request.
+ * It is stored on the token record before it is submitted; a retry or a reload certifies this same request and never builds another.
+ */
+export type PendingTx = NonNullable<TokenRecord['pending']>;
+
+/** Certify the stored transaction, or build, store (`persist`) and certify a new one; the token file grows by [tx, proof]. */
+async function spend(agg: Certifier, me: Burner, bytes: Uint8Array, pending: PendingTx | undefined, kind: PendingTx['kind'],
+  build: () => Promise<{ tx: TransferTransaction; extra: Pick<PendingTx, 'toPublicKey' | 'recipient'> }>, persist: (p: PendingTx) => void,
+  opts?: { timeoutMs?: number; everyMs?: number }): Promise<Uint8Array> {
+  if (pending && pending.kind !== kind) throw new Error(`a ${pending.kind} of this token is pending: run it to finish (the token's state is already being spent)`);
+  let p = pending;
+  if (p) {
+    fact('resuming', `the stored ${kind} (built ${new Date(p.at).toISOString()}), not a new one`);
+  } else {
+    const { tx, extra } = await build();
+    const cd = await CertificationData.fromTransaction(tx, await SignaturePredicateUnlockScript.create(tx, me.signer));
+    p = { kind, tx: hex(tx.toCBOR()), cd: hex(cd.toCBOR()), at: Date.now(), ...extra };
+    persist(p);
+  }
+  const proof = await certify(agg, CertificationData.fromCBOR(unhex(p.cd)), kind, opts);
+  const out = appendTransaction(bytes, unhex(p.tx), proof.toCBOR());
   fact('token', `${bytes.length} → ${out.length} bytes`);
   return out;
 }
 
-// ---- 5. burn ---------------------------------------------------------------------------------------------------------------------------------
+/** A certified transfer to another owner's public key. With `pending`, its stored recipient is used, whatever `toPublicKey` says. */
+export async function transfer(s: Pick<Session, 'agg'>, me: Burner, bytes: Uint8Array, toPublicKey: Uint8Array, pending: PendingTx | undefined, persist: (p: PendingTx) => void,
+  opts?: { timeoutMs?: number; everyMs?: number }): Promise<Uint8Array> {
+  return spend(s.agg, me, bytes, pending, 'transfer', async () => {
+    const token = await Token.fromCBOR(bytes);
+    return { tx: await TransferTransaction.create(token, SignaturePredicate.create(toPublicKey), StateMask.generate()), extra: { toPublicKey: hex(toPublicKey) } };
+  }, persist, opts);
+}
+
 /** A transfer to BurnPredicate(sha256(reason)), the reason naming the EVM recipient and amount the vault will credit. */
-export async function burn(s: Session, me: Burner, bytes: Uint8Array, recipient: string): Promise<Uint8Array> {
-  const { vaultCfg } = s;
-  const v = await withTrust(s, () => s.bridge.verifyNativeTokenBytes(bytes, 'receipt'));
-  const reason = returnReason(vaultCfg.chainId, vaultCfg.vault, vaultCfg.zeroAddress, vaultCfg.ty, vaultCfg.aid, unhex(recipient), v.outcome.amount);
-  const token = await Token.fromCBOR(bytes);
-  const tx = await TransferTransaction.create(token, BurnPredicate.create(sha256(reason)), StateMask.generate(), { data: reason });
-  fact('return reason', `${reason.length} bytes → ${recipient}`);
-  const proof = await certify(s.agg, await CertificationData.fromTransaction(tx, await SignaturePredicateUnlockScript.create(tx, me.signer)), 'burn');
-  return appendTransaction(bytes, tx.toCBOR(), proof.toCBOR());
+export async function burn(s: Pick<Session, 'agg' | 'vaultCfg' | 'bridge' | 'trust'>, me: Burner, bytes: Uint8Array, recipient: string, pending: PendingTx | undefined, persist: (p: PendingTx) => void,
+  opts?: { timeoutMs?: number; everyMs?: number }): Promise<Uint8Array> {
+  return spend(s.agg, me, bytes, pending, 'burn', async () => {
+    const { vaultCfg } = s;
+    const v = await withTrustRefresh(s.trust, s.agg, () => s.bridge.verifyNativeTokenBytes(bytes, 'receipt'));
+    const reason = returnReason(vaultCfg.chainId, vaultCfg.vault, vaultCfg.zeroAddress, vaultCfg.ty, vaultCfg.aid, unhex(recipient), v.outcome.amount);
+    const token = await Token.fromCBOR(bytes);
+    fact('return reason', `${reason.length} bytes → ${recipient}`);
+    return { tx: await TransferTransaction.create(token, BurnPredicate.create(sha256(reason)), StateMask.generate(), { data: reason }), extra: { recipient } };
+  }, persist, opts);
 }
 
 // ---- 6. return proof -------------------------------------------------------------------------------------------------------------------------
@@ -206,27 +315,41 @@ const describe = (encoded: Uint8Array, anchors: number, consolidated: boolean): 
  * redeem(bytes envelope): first eth_call it until the vault accepts (it refuses until the registry's usable origin covers the seal's round,
  * a few root rounds), then send it. Anyone may send it; the vault credits the recipient the burn names.
  */
-export async function redeem(s: Session, me: Burner, envelope: Uint8Array, expect: { nonce: bigint; tokenId: string }): Promise<Receipt> {
+export async function redeem(s: Session, me: Burner, envelope: Uint8Array, expect: { nonce: bigint; tokenId: string }, onSent?: (hash: string) => void):
+  Promise<{ rc: Receipt; already: false } | { already: true }> {
   const data = calldata('redeem(bytes)', encBytes(envelope));
   fact('calldata', `${data.length} bytes`);
   let polls = 0;
-  await waitFor('the vault to accept the return proof', 240_000, async () => {
+  let lastRevert: string | undefined;
+  const ok = await waitFor('the vault to accept the return proof', 240_000, async () => {
     polls++;
     try {
       const ret = (await s.evm.call(s.cfg.vault, data, me.evmAddress)).replace(/^0x/, '');
-      return BigInt(`0x${ret.slice(0, 64)}`) === expect.nonce && ret.slice(64, 128) === expect.tokenId ? true : undefined;
+      return BigInt(`0x${ret.slice(0, 64)}`) === expect.nonce && ret.slice(64, 128) === expect.tokenId ? 'accepted' as const : undefined;
     } catch (e) {
       if (e instanceof HttpError && e.status >= 400 && e.status < 500 && e.status !== 429) throw e;
+      if (e instanceof RpcError) {
+        lastRevert = revertName(e.data) ?? e.message;
+        // a redeem sent earlier (its receipt timed out, or the page reloaded) was mined: nothing more to send
+        if (lastRevert === 'PartAlreadyRedeemed') return 'already' as const;
+      }
       return undefined;
     }
-  }, 3000);
-  fact('eth_call polls until accepted', polls);
+  }, 3000).catch((e: unknown) => {
+    throw lastRevert ? new Error(`${e instanceof Error ? e.message : String(e)}; the vault's last answer: ${lastRevert}`) : e;
+  });
+  fact('eth_call polls', polls);
+  if (ok === 'already') {
+    fact('vault', 'PartAlreadyRedeemed: this burn is already redeemed');
+    return { already: true };
+  }
   const sent = await s.evm.send(me.secret, { to: s.cfg.vault, data });
+  onSent?.(sent.hash);
   fact('tx', sent.hash);
   const rc = await s.evm.waitReceipt(sent.hash);
   if (rc.status !== '0x1') throw new Error(`${rc.transactionHash} reverted`);
   fact('gas used', BigInt(rc.gasUsed));
-  return rc;
+  return { rc, already: false };
 }
 
 // ---- 8. claim --------------------------------------------------------------------------------------------------------------------------------

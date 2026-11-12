@@ -77,8 +77,8 @@ export class Evm {
   waitReceipt = (hash: string, timeoutMs = 180_000): Promise<Receipt> =>
     waitFor(`the receipt of ${hash}`, timeoutMs, async () => (await this.receipt(hash)) ?? undefined, 1500);
 
-  /** Sign and send one legacy transaction; returns its hash (the receipt is the caller's to wait for). */
-  async send(secret: Uint8Array, t: TxRequest): Promise<{ hash: string; raw: string; gas: bigint; gasPrice: bigint; nonce: bigint }> {
+  /** Sign one legacy transaction (estimate gas, price, check the balance, take the pending nonce); nothing is sent. */
+  async sign(secret: Uint8Array, t: TxRequest): Promise<SignedTx> {
     const from = evmAddressOf(secret);
     const value = t.value ?? 0n;
     const data = t.data ?? new Uint8Array();
@@ -89,10 +89,30 @@ export class Evm {
     if (balance < gas * gasPrice + value) throw new Error(`${from} holds ${balance} wei; this needs ${gas * gasPrice + value}: get UCT from the faucet`);
     const nonce = BigInt(await this.rpc<string>('eth_getTransactionCount', [from, 'pending']));
     const { raw, hash } = signLegacyTx({ nonce, gasPrice, gas, to: t.to, value, data, chainId: this.chainId }, secret);
-    await this.rpc('eth_sendRawTransaction', [raw]);
     return { hash, raw, gas, gasPrice, nonce };
   }
+
+  /** eth_sendRawTransaction of signed bytes. Sending the same bytes again is harmless: `alreadyKnown` errors are not errors. */
+  async broadcast(raw: string): Promise<void> {
+    try {
+      await this.rpc('eth_sendRawTransaction', [raw]);
+    } catch (e) {
+      if (!(e instanceof RpcError && alreadyKnown(e.message))) throw e;
+    }
+  }
+
+  /** Sign and send one legacy transaction; returns its hash (the receipt is the caller's to wait for). */
+  async send(secret: Uint8Array, t: TxRequest): Promise<SignedTx> {
+    const signed = await this.sign(secret, t);
+    await this.broadcast(signed.raw);
+    return signed;
+  }
 }
+
+export interface SignedTx { hash: string; raw: string; gas: bigint; gasPrice: bigint; nonce: bigint }
+
+/** The node already holds these exact bytes (geth/reth wording). */
+export const alreadyKnown = (message: string): boolean => /already known|known transaction|already imported|already exists/i.test(message);
 
 // ---- EIP-155 legacy transaction -----------------------------------------------------------------------------------------------------------------
 /** RLP of an unsigned integer: minimal big-endian bytes, zero as the empty string. */

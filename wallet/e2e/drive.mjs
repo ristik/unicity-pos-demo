@@ -4,7 +4,7 @@
 //
 // <tab> is the wallet profile (a, b, ...: each opens <url>?w=<tab>, with its own key and storage). Commands:
 //   connect            wait for the page to connect          addr        print the tab's EVM address
-//   step:<key>         run a flow step and print its result  (lock, lockproof, mint, transfer, burn, returnproof, redeem, claim)
+//   step:<key>         run a flow step and print its result  (lock, lockproof, mint, transfer, resend, receive, burn, returnproof, redeem, claim)
 //   check:<kind>       old-epoch check (verify | unknown | relabel)
 //   fund               "send 0.001 UCT gas" to the other tab   received    print the last received-token status
 //   trust              print the trust-base card             captcha     show the faucet widget

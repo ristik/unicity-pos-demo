@@ -13,7 +13,10 @@ export interface Settings {
   /** the faucet's API root: GET <faucet>/network, POST <faucet>/claim */
   faucet: string;
   testerConfig: string;
-  /** the genesis EntryID the trust history is pinned to; empty: take the operator's published trust-base.genesis.entryid */
+  /**
+   * The genesis EntryID the trust history is pinned to. It comes from the build (VITE_TRUST_PIN, wallet/.env.production) and is never taken
+   * from the server: with none, the wallet refuses to connect. The settings panel can override it (a labelled developer option).
+   */
   trustPin: string;
   /** the root network id (the trust history's; staging: 3) */
   network: number;
@@ -27,9 +30,12 @@ export const DEFAULTS: Settings = {
   lockproof: '/lockproof',
   faucet: '/api',
   testerConfig: env.VITE_TESTER_CONFIG ?? '/bridge/tester-config.json',
-  trustPin: env.VITE_TRUST_PIN ?? '',
+  trustPin: (env.VITE_TRUST_PIN ?? '').trim(),
   network: Number(env.VITE_NETWORK_ID ?? 3),
 };
+
+/** True when the settings panel replaces the build's trust pin (shown on the page as a developer override). */
+export const pinOverridden = (s: Settings): boolean => s.trustPin !== DEFAULTS.trustPin;
 
 export const loadSettings = (): Settings => ({ ...DEFAULTS, ...loadJson<Partial<Settings>>('settings', {}) });
 export const saveSettings = (s: Partial<Settings>): void => {
