@@ -16,6 +16,8 @@ export interface PendingTxRecord {
   toProfile?: string;
   /** the EVM recipient (a burn) */
   recipient?: string;
+  /** hex: the public key that signed it (the token's owner when it was built) */
+  signer?: string;
   /** set when the aggregator's last answer was an explicit refusal (its status): only then can it be discarded */
   refused?: string;
   /** set on a discarded entry */

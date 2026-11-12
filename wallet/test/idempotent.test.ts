@@ -14,7 +14,7 @@ import type { InclusionProof } from '@unicitylabs/state-transition-sdk/lib/api/I
 import { StateId } from '@unicitylabs/state-transition-sdk/lib/api/StateId.js';
 import { Token } from '@unicitylabs/state-transition-sdk/lib/transaction/Token.js';
 
-import { burn, certify, ConflictError, lock, probePending, RefusedError, RestoredError, StillPendingError, transfer, type LockEvm, type PendingLock, type PendingTx, type SpendCtx } from '../src/bridge.js';
+import { burn, certify, ConflictError, KeyMismatchError, lock, probePending, RefusedError, RestoredError, StillPendingError, transfer, type LockEvm, type PendingLock, type PendingTx, type SpendCtx } from '../src/bridge.js';
 import { calldata, encBytes, HttpError, LOCKED_TOPIC, RpcError, type Receipt } from '../src/evm.js';
 import { parseMessage } from '../src/handoff.js';
 import { hex, unhex } from '../src/hex.js';
@@ -176,8 +176,10 @@ function fakeEvm(me: ReturnType<typeof burnerOf>, o: { refuse?: string; mineOnBr
         await new Promise((res) => setTimeout(res, 5));
       }
     },
-    async rpc<T>(method: string): Promise<T> {
+    async rpc<T>(method: string, params?: unknown[]): Promise<T> {
       assert.equal(method, 'eth_getTransactionCount');
+      // another key's account: far ahead
+      if (typeof params?.[0] === 'string' && params[0].toLowerCase() !== me.evmAddress.toLowerCase()) return '0x5' as T;
       return `0x${accountNonce.toString(16)}` as T;
     },
     mineNow(hash) {
@@ -375,6 +377,51 @@ test('lock: "nonce too high" is not a refusal, and "replaced" needs two reads (a
   g.evm.mineNow(p.hash);
   const l = await lock({ evm: lagging, cfg: { vault: VAULT } }, me, 1000n, store, { recheckMs: 5 });
   assert.equal(l.lockTx, p.hash);
+});
+
+test('key swap: a pending lock signed by another key is refused and kept; its nonce is never read for this key', async () => {
+  const k1 = burnerOf(2);
+  const k2 = burnerOf(3);
+  const f = fakeEvm(k1);
+  const store = memStore();
+  await assert.rejects(lock({ evm: f.evm, cfg: { vault: VAULT } }, k1, 1000n, store, { timeoutMs: 10 }), /timed out/);
+  const p = store.get()!;
+  assert.equal(p.from, k1.evmAddress, 'the signer is recorded');
+  // the user imports K2 (nonce 5 on its own account) and runs Lock again
+  const nonceReads: unknown[] = [];
+  const watched: LockEvm = { ...f.evm, rpc: async <T>(m: string, params?: unknown[]) => (nonceReads.push(params?.[0]), f.evm.rpc<T>(m, params)) };
+  await assert.rejects(lock({ evm: watched, cfg: { vault: VAULT } }, k2, 1000n, store, { recheckMs: 1 }), (e: unknown) => e instanceof KeyMismatchError && /signed by/.test(e.message));
+  assert.deepEqual(store.get(), p, 'kept untouched');
+  assert.deepEqual(nonceReads, []);
+  assert.equal(f.broadcasts.length, 1, 'nothing rebroadcast');
+  // K1 back: it settles against K1's own account and finishes
+  f.evm.mineNow(p.hash);
+  const l = await lock({ evm: f.evm, cfg: { vault: VAULT } }, k1, 1000n, store, { recheckMs: 1 });
+  assert.equal(l.lockTx, p.hash);
+  assert.equal(store.get(), null);
+});
+
+test('key swap: a pending lock without a recorded signer is never dropped on a nonce or a refusal', async () => {
+  const me = burnerOf(3);
+  const f = fakeEvm(me, { refuse: 'transaction underpriced' });
+  const store = memStore();
+  // an older record (no `from`), and this key's account nonce is past it
+  store.put({ hash: `0x${'cd'.repeat(32)}`, raw: '0xf801', txNonce: '0', amountWei: '1000', at: 1 });
+  f.evm.takeNonce();
+  f.evm.takeNonce();
+  await assert.rejects(lock({ evm: f.evm, cfg: { vault: VAULT } }, me, 1000n, store, { recheckMs: 1 }), (e: unknown) => e instanceof StillPendingError);
+  assert.ok(store.get(), 'kept: only a receipt settles it');
+});
+
+test('key swap: a stored transfer signed by another key is refused, not resumed or rebuilt', async () => {
+  const { w, bytes, me } = await held();
+  let p: PendingTx | undefined;
+  await assert.rejects(transfer({ agg: fakeAgg(w, { certifyAfter: Infinity }).agg }, me, bytes, { publicKey: signer(3).publicKey }, { persist: (x) => (p = x) }, FAST));
+  assert.equal(p?.signer, hex(me.publicKey));
+  const other = fakeAgg(w);
+  await assert.rejects(transfer({ agg: other.agg }, burnerOf(7), bytes, { publicKey: signer(3).publicKey }, { pending: p, persist: () => assert.fail('rebuilt') }, FAST),
+    (e: unknown) => e instanceof KeyMismatchError);
+  assert.equal(other.submitted.length, 0);
 });
 
 // ---- handoff messages ----------------------------------------------------------------------------------------------------------------------
