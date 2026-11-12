@@ -61,7 +61,11 @@ Each step can be run again, or the page reloaded part way through, without losin
   that copy survived (a copy whose lock is already on a token record is dropped instead). The record names its signer: it is resumed and
   settled only with that key, and a record that names no signer is settled by its receipt alone.
 - **Key import:** refused while anything signed by the current key is unfinished (a pending lock, a lock not minted yet, a stored
-  transfer or burn). The page lists them and shows the current key for export first. Stored transfers and burns also name their signer and
+  transfer or burn). The page lists them and shows the current key for export first. When the current key still holds value (an EVM
+  balance, unclaimed vault credit, a held or received token, or a burned token that credits its address; a balance or credit that cannot be
+  read counts as held), the page shows the key and the import needs the word `replace` typed in.
+- **Gas to the other tab:** the sent transaction is stored until its receipt is read; while it is, the button checks it instead of sending
+  another. Stored transfers and burns also name their signer and
   are not resumed under another key.
 - **Transfer and burn:** the transaction (with its random state mask) and its signed certification request are stored on the token record
   before they are submitted. A retry submits that same request, and never builds a new one. *Discard pending* is offered only after the
