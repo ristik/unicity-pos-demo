@@ -1,0 +1,20 @@
+{
+  "repository": "https://github.com/ristik/native-bridge-plugins.git",
+  "commit": "e1f58eddaeea5256137cd9ac7b6c80e11578c78f",
+  "branch": "docs/sdk-4-trust-history",
+  "directory": "packages/native-bridge-plugin",
+  "name": "@unicitylabs/native-bridge-plugin",
+  "version": "0.1.0",
+  "tarball": "unicitylabs-native-bridge-plugin-0.1.0.tgz",
+  "sha256": "095dcca98b5815519311138a81fa549bae040e8b530b78fb3923e1172964ee09",
+  "integrity": "sha512-HIKvtLnyICGyjqimYIB/AMBInk6wounUGp3RqHfDBYXdSzzJnDNY/Z9D1IiahKfUIO2jcDHq46AOCtRI+4LAZw==",
+  "build": [
+    "git archive <commit> | tar -x",
+    "npm ci --ignore-scripts (repo root, with its vendored SDK and bridge-core tarballs)",
+    "npm run build (in packages/native-bridge-plugin: tsc -p tsconfig.json -> lib/)",
+    "package.json: drop the file: dependencies on @unicitylabs/bridge-core and @unicitylabs/state-transition-sdk and declare both as peerDependencies \"*\" (written with JSON.stringify(p, null, 2), no trailing newline), so the wallet's own vendored SDK and bridge-core are used",
+    "npm pack --ignore-scripts"
+  ],
+  "verified": "2026-11-13: the tarball's lib/ and README.md are byte-identical to a build of this commit (nbp-docs worktree); package.json is identical to the commit's after the rewrite above. Re-packing gives the same files but another tarball sha256 (gzip/npm metadata), so check the contents, not the tarball hash.",
+  "notes": "The plug-in is the token verifier the wallet relies on. No pack script for it exists in either repository; the rewrite step was done by hand when the tarball was made (unicity-pos-demo 94cc17c)."
+}
