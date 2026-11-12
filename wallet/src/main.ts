@@ -725,12 +725,13 @@ function header(): HTMLElement {
     h('button', { class: 'link', disabled: !!busy, onclick: () => void step('connect', connect) }, 'reconnect'),
     st && !st.ok ? h('span', { class: 'msg bad' }, st.text) : '',
     h('details', { class: 'inline' }, h('summary', {}, 'explain'), explain(traces.get('connect'))),
+    h('a', { href: './pos.html' }, 'PoS visualizer'),
     !settings.trustPin.trim() ? h('p', { class: 'banner bad' }, NO_PIN) : '',
     settings.trustPin.trim() && pinOverridden(settings)
       ? h('p', { class: 'banner warn' }, 'Developer override: the trust pin comes from Network settings, not from this build: ', mono(settings.trustPin)) : '');
 }
 
-const slots = { header: h('div'), identity: h('div'), trust: h('div'), flow: h('div'), check: h('div') };
+const slots = { header: h('div'), identity: h('div'), trust: h('div'), flow: h('div'), check: h('div', { id: 'check' }) };
 root.replaceChildren(slots.header, h('main', {},
   h('div', { class: 'col' }, slots.identity, faucetCard, slots.trust),
   h('div', { class: 'col wide' }, slots.flow, slots.check, settingsCard())));

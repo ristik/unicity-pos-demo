@@ -29,6 +29,37 @@ A minimal in-browser wallet for the Unicity PoS demo: Vite + TypeScript, no fram
     any signature is checked. If a later epoch is held, the round moves to the end of the seal's epoch, which is what a retired committee signing after its
     end looks like. If only the genesis epoch is held, the seal claims the epoch before it.
 
+## PoS visualizer (`pos.html`)
+
+A second page of the same bundle, served at `/demo/pos.html` (source `src/pos/`). It only reads: `eth_call` against `latest` and
+`GET /api/v1/trustbases`. Each panel has an *explain* drawer that lists the calls behind it: the contract, the address, the function and
+arguments, the decoded result and the source line.
+
+- **Committee now:** `custody.lastAckedAssignment()`, then its `assignments`, `assignmentExposures` and `exposures`. The panel shows each
+  member's StakingID, owner, root key hash (with the UTB node id matched by `keccak256(sigKey)`), EVM key, committed weight q, bond lots,
+  generation and retirement state. It draws W as a weight bar with the root quorum ⌊2W/3⌋+1 and the EVM threshold ⌊W/2⌋+1. The *what if* box
+  takes members offline or changes their weights. That is local arithmetic only: live signer data is not public.
+- **Election:** `params()`, `thresholds()`, and the registry's `progress()` and `ucTime()`. It shows rounds and seconds to the next due point,
+  plus an ETA from the observed progress rate. The open result shows `result`, `frozenMembers` and `publication`, with its age against the
+  roots' 16,384-round rejection window. It also shows `lastAttemptResult` and the last registry records. The churn table evaluates M, turnover
+  < 1/3, D and overlap > 2/3 for the open result's candidate (`reader.committed(assignmentID)`). With no result open, it uses the
+  page's port of `Selection.sol` over the eligible identities. A hypothetical successor can be edited and evaluated next to it.
+- **Identities:** every ID in 1..`nextStakingID()`: position, lots, live index, exclusion, delegation, EVM key registration, retirement and
+  eligibility. A newly registered validator appears here before it is elected.
+- **UTB history:** the pinned, authenticated history (`src/trust.ts`, shared with the wallet). For each epoch it shows the EntryID, rounds,
+  members mapped to StakingIDs, quorum, and which predecessor members signed it with what weight. There is a link to the wallet's old-epoch check.
+- **Meta-parameters:** `custody.bondUnit/minBond/limits`, `election.params`, `policy()`, the governance delay, the reward rate, the pool and
+  the stake book, each with one line of meaning.
+
+The committee arithmetic (`src/pos/rules.ts`: quorum, Quantize, Continuity, Selection) is tested against the contracts' own vector files
+(`test/fixtures/p85/`, contracts 7b510f6b). Polling is sequential, with requests at least 250 ms apart and backoff on refusals. The page reads
+the clock and pointers every 8 s (`?poll=ms`). It reads everything else when a pointer changes or every 30 s, the trust bases every 20 s,
+and the parameters every 5 min. Immutable views are cached. Contract addresses default to the generation's `pos-deployment.json`. They can be
+overridden by `VITE_POS_CUSTODY/ELECTION/REWARD_POOL` or `?custody=&election=&rewardPool=`. The trust pin is the wallet's:
+`VITE_TRUST_PIN` from the build, or the wallet's Network-settings developer override, which the page labels as such. It is never taken from
+the server or the URL. Without a pin, the UTB card says so and loads nothing. The page keeps its history under its own storage keys
+(`unicity-demo.<profile>.pos.trust.*`), so it never writes the wallet's.
+
 ## Configuration
 
 Endpoints default to same-origin paths. The *Network settings* panel overrides them per tab profile (kept in localStorage):

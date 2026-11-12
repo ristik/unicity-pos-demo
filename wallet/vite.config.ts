@@ -44,7 +44,8 @@ const proxy: Record<string, ProxyOptions> = {
 
 export default defineConfig({
   base: '/demo/',
-  build: { target: 'es2022', sourcemap: true },
+  // two pages: the wallet (index.html) and the PoS visualizer (pos.html)
+  build: { target: 'es2022', sourcemap: true, rollupOptions: { input: { wallet: 'index.html', pos: 'pos.html' } } },
   plugins: env.BRIDGE_DIR ? [bridgeDir(env.BRIDGE_DIR)] : [],
   server: { port: Number(env.PORT ?? 5173), proxy },
   // `vite preview` serves the built bundle with the same routes
