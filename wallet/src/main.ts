@@ -55,9 +55,9 @@ const pendingLock: bridge.PendingLockStore = {
     saveJson('lock.pending', p);
     await idbPendingLock('put', p);
   },
-  clear: () => {
+  clear: async () => {
     remove('lock.pending');
-    void idbPendingLock('delete');
+    await idbPendingLock('delete');
   },
 };
 
@@ -98,10 +98,28 @@ async function idbOp(op: 'put' | 'delete' | 'get', p?: bridge.PendingLock): Prom
   }
 }
 
+/** What is bound to the current key and not finished: a pending lock (either copy), locks not minted yet, pending transfers and burns. */
+async function pendingWork(): Promise<string[]> {
+  const out: string[] = [];
+  const lockRec = pendingLock.get() ?? (await idbPendingLock('get'));
+  if (lockRec) out.push(`lock ${lockRec.hash} (${fmtUnits(BigInt(lockRec.amountWei))} UCT) is waiting for its receipt`);
+  for (const t of listTokens()) {
+    if (t.phase === 'locked' || t.phase === 'proved') out.push(`lock ${t.id} (${fmtUnits(BigInt(t.amountWei))} UCT) is not minted yet: only this key can mint it`);
+    if (t.pending) out.push(`a ${t.pending.kind} of token ${t.id} (${fmtUnits(BigInt(t.amountWei))} UCT) is stored and not certified yet`);
+  }
+  return out;
+}
+
 /** On load: a pending lock that only the IndexedDB copy holds (localStorage lost it in a hard kill) is put back. */
 async function restorePendingLock(): Promise<void> {
   if (pendingLock.get()) return;
   const p = await idbPendingLock('get');
+  // a stale copy (the lock finished, its delete did not land): its receipt is already on a token record
+  if (p && listTokens().some((t) => t.lockTx?.toLowerCase() === p.hash.toLowerCase())) {
+    await idbPendingLock('delete');
+    fact('pending lock', `dropped a stale IndexedDB copy of ${p.hash}: the lock is already recorded`);
+    return;
+  }
   if (p) {
     saveJson('lock.pending', p);
     fact('pending lock', `restored ${p.hash} from the IndexedDB copy`);
@@ -224,6 +242,7 @@ const STEPS: StepDef[] = [
     input: () => h('label', {}, amountInput, ' UCT'),
     note: () => {
       const p = pendingLock.get();
+      if (p?.from && p.from.toLowerCase() !== me.evmAddress.toLowerCase()) return `Lock ${p.hash.slice(0, 18)}… is pending, signed by ${p.from}, not this key: import that key again to finish it. It is kept.`;
       return p ? `Lock ${p.hash.slice(0, 18)}… (${fmtUnits(BigInt(p.amountWei))} UCT) is pending: Run polls it; no second lock is sent.` : undefined;
     },
     run: async () => {
@@ -507,9 +526,18 @@ function identityCard(): HTMLElement {
     h('div', { class: 'row' },
       h('button', { class: 'link', onclick: showBackup }, 'export key'),
       h('details', { class: 'inline' }, h('summary', {}, 'import key'), importBox, h('button', {
-        onclick: () => {
+        onclick: async () => {
           try {
-            me = replaceKey(parseBackup(importBox.value));
+            const secret = parseBackup(importBox.value);
+            // a lock or transaction in flight is bound to this key: replacing it would strand it
+            const blocking = await pendingWork();
+            if (blocking.length) {
+              showBackup();
+              alert(`This tab's key cannot be replaced while work signed by it is pending:\n\n- ${blocking.join('\n- ')}\n\n`
+                + 'Finish it first (or discard a refused transfer or burn). Export the current key (shown below) before you replace it.');
+              return;
+            }
+            me = replaceKey(secret);
             location.reload();
           } catch (e) {
             alert(String(e));

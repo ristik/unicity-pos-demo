@@ -150,9 +150,23 @@ export function appendTransaction(tokenBytes: Uint8Array, tx: Uint8Array, proof:
 export interface Lock { nonce: bigint; amountWei: bigint; lockTx: string; lockBlockHash: string; blockNumber: bigint }
 
 /** A signed lock transaction not yet seen in a receipt: kept (localStorage) before it is broadcast, so it is polled, never sent twice. */
-export interface PendingLock { hash: string; raw: string; txNonce: string; amountWei: string; at: number }
-/** `put` may be async (a durable write): lock awaits it before broadcasting. */
-export interface PendingLockStore { get(): PendingLock | null; put(p: PendingLock): void | Promise<void>; clear(): void }
+export interface PendingLock {
+  hash: string; raw: string; txNonce: string; amountWei: string; at: number;
+  /** the signer's EVM address: the record is resumed and settled only against it (absent on records from before it was kept) */
+  from?: string;
+}
+/** `put` and `clear` may be async (durable writes): lock awaits them. */
+export interface PendingLockStore { get(): PendingLock | null; put(p: PendingLock): void | Promise<void>; clear(): void | Promise<void> }
+
+/** A stored lock or transaction was signed by another key than the page's: it is kept, untouched, until that key is back. */
+export class KeyMismatchError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'KeyMismatchError';
+  }
+}
+
+const sameAddress = (a: string | undefined, b: string): boolean => !!a && a.toLowerCase() === b.toLowerCase();
 /** What lock needs of the EVM (a fake in the tests). */
 export type LockEvm = Pick<Evm, 'sign' | 'broadcast' | 'receipt' | 'waitReceipt' | 'rpc'>;
 
@@ -183,10 +197,20 @@ export async function lock(s: { evm: LockEvm; cfg: Pick<TesterConfig, 'vault'> }
   opts: { timeoutMs?: number; recheckMs?: number } = {}): Promise<Lock & { resumed: boolean }> {
   let p = store.get();
   const resumed = !!p;
+  if (p?.from && !sameAddress(p.from, me.evmAddress)) {
+    throw new KeyMismatchError(`the pending lock ${p.hash} was signed by ${p.from}, not by this key (${me.evmAddress}): it is kept untouched; import that key `
+      + 'again to finish it (the token can only be minted by its signer)');
+  }
+  /**
+   * Only a record that names its signer, and the signer is this key, may be cleared on the strength of a nonce: a record from before the
+   * signer was kept is settled by its receipt alone ("replaced" and "refused" read as still pending).
+   */
+  const signerKnown = !p || sameAddress(p.from, me.evmAddress);
   /** What the chain says now: mined (receipt), replaced (nonce used, no receipt), or open (neither). One read; see settle. */
   const settleOnce = async (q: PendingLock): Promise<'mined' | 'replaced' | 'open'> => {
     if (await s.evm.receipt(q.hash)) return 'mined';
-    const used = BigInt(await s.evm.rpc<string>('eth_getTransactionCount', [me.evmAddress, 'latest']));
+    if (!signerKnown) return 'open';
+    const used = BigInt(await s.evm.rpc<string>('eth_getTransactionCount', [q.from ?? me.evmAddress, 'latest']));
     // the receipt again: the transaction may be mined between the two reads
     if (await s.evm.receipt(q.hash)) return 'mined';
     return used > BigInt(q.txNonce) ? 'replaced' : 'open';
@@ -201,8 +225,8 @@ export async function lock(s: { evm: LockEvm; cfg: Pick<TesterConfig, 'vault'> }
     await sleep(opts.recheckMs ?? 4000);
     return settleOnce(q);
   };
-  const replaced = (q: PendingLock): never => {
-    store.clear();
+  const replaced = async (q: PendingLock): Promise<never> => {
+    await store.clear();
     throw new Error(`the pending lock ${q.hash} was not mined and its account nonce ${q.txNonce} is used by another transaction: nothing was locked by it, Run locks again`);
   };
   /** A broadcast failed: decide from the chain, not from the error. Clear only on a refusal of a transaction that is provably not mined. */
@@ -214,17 +238,18 @@ export async function lock(s: { evm: LockEvm; cfg: Pick<TesterConfig, 'vault'> }
       throw new StillPendingError(`the lock ${q.hash} may have been sent (${errText(e)}), and its state cannot be read now: it stays pending, Run again later`);
     }
     if (state === 'mined') return;
-    if (state === 'replaced') replaced(q);
-    if (isRefusal(e)) {
-      store.clear();
+    if (state === 'replaced') await replaced(q);
+    if (signerKnown && isRefusal(e)) {
+      await store.clear();
       throw new Error(`the node refuses the lock ${q.hash} (${errText(e)}) and it is not mined: nothing was locked; Run locks again`);
     }
     throw new StillPendingError(`the lock ${q.hash} is not mined yet and the send was not conclusive (${errText(e)}): it stays pending, Run again later`);
   };
   if (p) {
     fact('resuming the pending lock', `${p.hash} (${p.amountWei} wei, signed ${new Date(p.at).toISOString()})`);
+    if (!signerKnown) fact('signer', 'not recorded on this pending lock (an older record): it is settled by its receipt only, never dropped on a nonce');
     const state = await settle(p);
-    if (state === 'replaced') replaced(p);
+    if (state === 'replaced') await replaced(p);
     if (state === 'open') {
       try {
         await s.evm.broadcast(p.raw);
@@ -236,7 +261,7 @@ export async function lock(s: { evm: LockEvm; cfg: Pick<TesterConfig, 'vault'> }
     if (amountWei <= 0n || amountWei >= 1n << 64n) throw new Error('one lock carries 1 to 2^64-1 wei');
     const data = calldata('lock(bytes)', encBytes(me.predicate));
     const signed = await s.evm.sign(me.secret, { to: s.cfg.vault, data, value: amountWei });
-    p = { hash: signed.hash, raw: signed.raw, txNonce: signed.nonce.toString(), amountWei: amountWei.toString(), at: Date.now() };
+    p = { hash: signed.hash, raw: signed.raw, txNonce: signed.nonce.toString(), amountWei: amountWei.toString(), at: Date.now(), from: me.evmAddress };
     await store.put(p);
     fact('tx', signed.hash);
     fact('calldata', `${data.length} bytes (p0 = owner predicate, ${me.predicate.length} bytes)`);
@@ -249,14 +274,14 @@ export async function lock(s: { evm: LockEvm; cfg: Pick<TesterConfig, 'vault'> }
   }
   const rc = await s.evm.waitReceipt(p.hash, opts.timeoutMs);
   if (rc.status !== '0x1') {
-    store.clear();
+    await store.clear();
     throw new Error(`${rc.transactionHash} reverted: nothing was locked`);
   }
   const log = rc.logs.find((l) => l.address.toLowerCase() === s.cfg.vault.toLowerCase() && l.topics[0] === LOCKED_TOPIC);
   if (!log) throw new Error(`${rc.transactionHash} has no Locked event of the vault`);
   const nonce = BigInt(log.topics[1]);
   fact('Locked event', `nonce ${nonce}, block ${BigInt(rc.blockNumber)}, gas used ${BigInt(rc.gasUsed)}`);
-  store.clear();
+  await store.clear();
   return { nonce, amountWei: BigInt(p.amountWei), lockTx: rc.transactionHash, lockBlockHash: rc.blockHash, blockNumber: BigInt(rc.blockNumber), resumed };
 }
 
@@ -346,12 +371,15 @@ async function spend(agg: Certifier, me: Burner, bytes: Uint8Array, ctx: SpendCt
   const { pending } = ctx;
   if (pending && pending.kind !== kind) throw new Error(`a ${pending.kind} of this token is pending: run it to finish (the token's state is already being spent)`);
   let p = pending;
+  if (p?.signer && p.signer !== hex(me.publicKey)) {
+    throw new KeyMismatchError(`the pending ${p.kind} was signed by key ${p.signer.slice(0, 16)}…, not this one: it is kept; import that key again to finish it`);
+  }
   if (p) {
     fact('resuming', `the stored ${kind} (built ${new Date(p.at).toISOString()}), not a new one`);
   } else {
     const { tx, extra } = await build();
     const cd = await CertificationData.fromTransaction(tx, await SignaturePredicateUnlockScript.create(tx, me.signer));
-    p = { kind, tx: hex(tx.toCBOR()), cd: hex(cd.toCBOR()), at: Date.now(), ...extra };
+    p = { kind, tx: hex(tx.toCBOR()), cd: hex(cd.toCBOR()), at: Date.now(), signer: hex(me.publicKey), ...extra };
     ctx.persist(p);
   }
   const cur = p;
@@ -370,7 +398,7 @@ async function spend(agg: Certifier, me: Burner, bytes: Uint8Array, ctx: SpendCt
     // the state is certified for another transaction: one the user discarded earlier, certified late?
     const d = (ctx.discarded ?? []).find((x) => proofIsFor(e.proof, CertificationData.fromCBOR(unhex(x.cd))));
     if (!d) throw e;
-    const restored: PendingTx = { kind: d.kind, tx: d.tx, cd: d.cd, at: d.at, toPublicKey: d.toPublicKey, recipient: d.recipient, toProfile: d.toProfile };
+    const restored: PendingTx = { kind: d.kind, tx: d.tx, cd: d.cd, at: d.at, toPublicKey: d.toPublicKey, recipient: d.recipient, toProfile: d.toProfile, signer: d.signer };
     ctx.restore?.(restored);
     fact('recovered', `the ${d.kind} discarded at ${d.discardedAt ? new Date(d.discardedAt).toISOString() : '?'} is certified: restored, the new ${kind} is dropped`);
     if (d.kind !== kind) throw new RestoredError(`the ${d.kind} discarded earlier was certified after all: it is restored as pending; run ${d.kind} to finish it`, restored);
