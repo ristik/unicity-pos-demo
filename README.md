@@ -13,8 +13,8 @@ It is served at `https://pos.staging.unicity.network/demo/`, on the same origin 
 
 `vendor/` pins the SDK and the native bridge plug-in that the wallet bundles:
 
-- `@unicitylabs/state-transition-sdk` 4.0.0-utb.c5840ef: the same tarball as `ristik/native-bridge-plugins/vendor/`.
-- `@unicitylabs/bridge-core` 0.1.0-bridge.2: same source as the SDK.
+- `@unicitylabs/state-transition-sdk` 4.0.0-utb.c5840ef: the same tarball as `ristik/native-bridge-plugins/vendor/`. The provenance files are next to it.
+- `@unicitylabs/bridge-core` 0.1.0-bridge.2: built from `unicitynetwork/unicity-bridge` `deb2b86c`, the same tarball as in native-bridge-plugins.
 - `@unicitylabs/native-bridge-plugin` 0.1.0: `npm pack` of `ristik/native-bridge-plugins` `packages/native-bridge-plugin`. Its two relative `file:` dependencies are turned into peer dependencies.
 
 ## Build

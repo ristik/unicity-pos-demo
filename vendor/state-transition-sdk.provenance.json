@@ -1,0 +1,19 @@
+{
+  "repository": "https://github.com/ristik/state-transition-sdk-js.git",
+  "commit": "c5840ef5f59201c52ea6cf7034ee02cb48d54007",
+  "directory": ".",
+  "name": "@unicitylabs/state-transition-sdk",
+  "version": "4.0.0-utb.c5840ef",
+  "tarball": "unicitylabs-state-transition-sdk-4.0.0-utb.c5840ef.tgz",
+  "sha256": "6b415c1cadf614099b7eed22262b4a015b486b2e436cb378d85f2e0e79fba282",
+  "integrity": "sha512-hfDThaOZtTWllM2gsh6SEUdseUrW01UzhfF2JU7eH6TaULC7lQSkr5B0FA3blvJlse7Mtsm7wp0U8pzaGxzkQQ==",
+  "build": [
+    "git archive <commit> | tar -x",
+    "npm pkg set version=4.0.0-utb.c5840ef",
+    "npm ci --ignore-scripts",
+    "npm run build",
+    "npm pack --ignore-scripts"
+  ],
+  "nodeVersion": "24.22.1",
+  "npmVersion": "11.21.0"
+}
