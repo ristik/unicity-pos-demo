@@ -125,16 +125,17 @@ Forks keep `main` as the upstream-sync branch. UTB v2 is being upstreamed: bft-g
 
 | Step | Call |
 |---|---|
-| fund | `POST /api/claim` {address, hCaptcha token} |
-| balances, contracts | `eth_call`, `eth_getLogs`, `eth_sendRawTransaction` on `/rpc` |
-| lock | `BridgeVault.lock(...)` |
-| lock proof | `eth_getProof` + block header + UC of that block |
-| mint / transfer | aggregator `submit_commitment`, `get_inclusion_proof` |
-| verify | SDK `TrustBaseHistory` + `/api/v1/trustbases` (only fetch) |
-| redeem | `BridgeVault.redeem(history, UCs)` → precompile `0x0105` |
-| PoS view | `StakeCustody` / `ElectionPolicy` views + events |
+| fund | faucet `POST /api/claim` {address, hCaptcha token}; `GET /api/network` |
+| EVM reads/writes | `/rpc`: `eth_call`, `eth_estimateGas`, `eth_sendRawTransaction`, `eth_getTransactionReceipt`, `eth_getBalance`, `eth_getBlockByNumber` |
+| lock | `BridgeVault.lock(bytes)` |
+| lock proof | `GET /lockproof/v1/lockproof?block=&nonce=` (EVM UC + header + MPT proof; built server-side) |
+| mint / transfer / burn | aggregator `submitCertificationRequest`, `getInclusionProof` |
+| trust | `getTrustBasePage` → local `TrustBaseHistory`, refreshed on `ErrNoEntryForEpoch` |
+| return proof | aggregator consolidation: the burned token's proofs under **one** seal |
+| redeem / claim | `BridgeVault.redeem(bytes)` → precompile `0x0105`; then `claim` |
+| PoS view | `eth_call` views only: `StakeCustody`, `ElectionPolicy`, `SealRegistry` record log |
 
-<!-- TODO(verify): exact method names once the wallet is wired; fill from research-assets. -->
+The public `/rpc` is allow-listed: no `eth_getLogs`, no `eth_getProof`, no batches. The visualizer rebuilds history from the registry record log.
 
 ---
 
@@ -215,9 +216,12 @@ Not offences: duplicate or re-encoded statements, different rounds, absence from
 ## A logical validator, and how it joins
 
 ```
-laptop (colima) ──ssh -R──▶ staging host
-  root · shard · authority · ureth  (one docker "pod")
+laptop (colima, pod5)                       staging host
+ root5 · shard5 · authority5 · ureth5
+   peer stubs root1-4 / shard1-4 / ureth1-4 ─ssh -L─▶ root1-4:8000, shard1-4:9000, ureth1-4:8545
+   root5:8000, shard5:9000, agent :28700   ◀─ssh -R─  laptop-relay container (validators net)
 ```
+One `ssh -N`, no listener on the host (`GatewayPorts no` stays). Peer ports are libp2p, authenticated by peer id.
 
 1. Generate keys: root key, signing keys, EVM key.
 2. `StakeCustody.register(rootKey, pop, withdrawal)`
@@ -226,7 +230,7 @@ laptop (colima) ──ssh -R──▶ staging host
 5. Next election → `submitAssignmentPoPs` → handoff → **new UTB entry**
 6. Leave: `requestRetirement(id)` → excluded at the next election → `mature` → `claim`
 
-<!-- TODO(verify): ports and the tunnel layout from research-pos. -->
+Keys stay in the laptop's memory: sleep the laptop or restart colima and that validator is gone. Late joiners replay the chain (~4 blocks/s).
 
 ---
 
