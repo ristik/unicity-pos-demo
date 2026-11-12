@@ -117,7 +117,7 @@ Not public: root/shard admin, authority, Engine API, Prometheus.
 | `ristik/bft-go-base` | shared Go types, trust-base codecs | `integration/enshrined-evm` |
 | `ristik/unicity-pos-demo` | this wallet, visualizer and slides | `main` |
 
-Forks keep `main` as the upstream-sync branch. UTB v2 is merged upstream: bft-go-base#20 (2026-11-09); aggregator-go#273, sdk-js#206, sdk-rust#73, sdk-java#101 (2026-11-11); unicity-ids too.
+Forks keep `main` as the upstream-sync branch. UTB v2 is merged upstream: bft-go-base#20 (2026-11-09); aggregator-go#273, sdk-js#206, sdk-rust#73, sdk-java#101 (2026-11-11); unicity-ids#11 (2026-11-09).
 
 ---
 
