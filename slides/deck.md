@@ -1,0 +1,285 @@
+---
+marp: true
+theme: default
+paginate: true
+title: Unicity PoS staging: the stack and a live demo
+style: |
+  section { font-size: 24px; }
+  section.small { font-size: 19px; }
+  table { font-size: 0.85em; }
+  code { font-size: 0.9em; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2em; }
+---
+
+<!-- _paginate: false -->
+
+# Unicity PoS staging
+
+### Enshrined EVM · proof of stake · native bridge · trust-base history
+
+Live demo on `pos.staging.unicity.network`
+
+<!-- Speaker: 45 min. About 15 min of slides, about 20 min demo, 10 min Q&A. -->
+
+---
+
+## What we'll show
+
+1. **The setup**: what runs on the staging network, its endpoints and repos.
+2. **Assets demo**: UCT from the faucet → bridged to a Unicity token → sent to a phone → bridged back.
+3. **PoS demo**: committee, stakes and quorum, live. Then this laptop **joins as a validator**, an old validator **retires**, and an old token **still verifies**.
+4. **How it works underneath**: contracts, logical validator, bridge vs bridging to an external chain.
+
+Everything in the demo runs in a browser: no install, a burner key, public endpoints only.
+
+---
+
+## The stack in one picture
+
+```
+            ┌──────────── one validator organization ────────────┐
+            │  root node ── BFT consensus, epochs, handoffs      │
+            │  shard node ─ certifies EVM blocks (partition 8)   │
+  ×4        │  authority ── signing keys                         │
+            │  ureth ────── EVM execution (reth v2.5 fork)       │
+            └────────────────────────────────────────────────────┘
+                         │ unicity certificates (UC)
+   aggregator-go (partition 7, SMT) ── token state certification
+   SDKs (JS / Rust / Java 4.0) ── self-contained tokens + UTB history
+```
+
+- One security principal per validator: root key and EVM key are different keys bound to one identity.
+- No separate settlement chain. Certification means "the honest majority executed this" (no ZK).
+
+---
+
+## Key terms
+
+- **Unicity certificate (UC)**: the root's proof that a shard state was certified. Input record → shard tree → unicity tree → **seal** signed by the root committee. Valid when the signers reach `⌊2W/3⌋+1` of **the seal's own epoch's** committee, with at most 16 signatures.
+- **Epoch**: a period with one fixed committee (members, keys, weights). It changes only through the ordered **handoff**: Intent → Prepare → Endorse → Commit → Activate → Acknowledge.
+- **UTB (trust-base history)**: an append-only chain of signed root trust-base entries, one per epoch. Each entry is signed by its **predecessor's** quorum. The genesis entry ID is the network's trust pin.
+  → *Tokens stay verifiable across validator rotations.*
+
+---
+
+## Staging network
+
+<div class="cols">
+<div>
+
+| | |
+|---|---|
+| Host | 1 bare-metal server, 12 cores |
+| Validators | 4, weight 1 each |
+| Chain ID | `5587796` = `0x554354` = "UCT" |
+| Elections | every 400 rounds **and** 300 s |
+| Bond unit / min bond | 100 UCT |
+| Containers | 31 |
+
+</div>
+<div>
+
+| Endpoint | |
+|---|---|
+| `POST /rpc` | EVM JSON-RPC (allow-listed) |
+| `POST /aggregator` | aggregator JSON-RPC |
+| `GET /api/v1/trustbases` | UTB history (CBOR) |
+| `/faucet/` | hCaptcha faucet |
+| `/demo/` | this demo |
+
+</div>
+</div>
+
+Not public: root/shard admin, authority, Engine API, Prometheus.
+
+---
+
+<!-- _class: small -->
+
+## Repos
+
+| Repo | Role | Branch |
+|---|---|---|
+| `ristik/bft-core` | root chain, shard nodes, Engine API adapter, epochs, UTB, testnet package | `integration/enshrined-evm` |
+| `ristik/ureth` | EVM execution: reth fork + system prefix, SealRegistry kernel, precompiles | `unicity/main` |
+| `ristik/unicity-pos-contracts` | SealRegistry, P85 PoS modules, BridgeVault, WUCT, FeeCollector, vesting | `main` |
+| `ristik/native-bridge-plugins` | bridge protocol v7, corpus, TS + Rust plug-ins on public SDK APIs | `main` |
+| `ristik/aggregator-go` | aggregator + UTB history + uc-consolidation | `integration/enshrined-evm` |
+| `ristik/state-transition-sdk-{js,rust,java}` | SDK 4.0: `RootTrustBaseV2`, `TrustBaseHistory` | `integration/enshrined-evm` |
+| `ristik/bft-go-base` | shared Go types, trust-base codecs | `integration/enshrined-evm` |
+| `ristik/unicity-pos-demo` | this wallet, visualizer and slides | `main` |
+
+Forks keep `main` as the upstream-sync branch. UTB v2 is being upstreamed: bft-go-base, unicity-ids and Java are merged; JS #206 and Rust #73 merged 2026-11-11.
+
+---
+
+## API surface the demo uses
+
+| Step | Call |
+|---|---|
+| fund | `POST /api/claim` {address, hCaptcha token} |
+| balances, contracts | `eth_call`, `eth_getLogs`, `eth_sendRawTransaction` on `/rpc` |
+| lock | `BridgeVault.lock(...)` |
+| lock proof | `eth_getProof` + block header + UC of that block |
+| mint / transfer | aggregator `submit_commitment`, `get_inclusion_proof` |
+| verify | SDK `TrustBaseHistory` + `/api/v1/trustbases` (only fetch) |
+| redeem | `BridgeVault.redeem(history, UCs)` → precompile `0x0105` |
+| PoS view | `StakeCustody` / `ElectionPolicy` views + events |
+
+<!-- TODO(verify): exact method names once the wallet is wired; fill from research-assets. -->
+
+---
+
+## Inside ureth: every block starts with a protocol prefix
+
+1. registry `open` → 2. registry `finalize` → 3. EIP-4788 hook → 4. control-record import → 5. PoS hooks (reconcile, governance, **election**) → 6. user transactions
+
+- Prefix failure ⇒ invalid block. System gas is reserved, not charged.
+- **SealRegistry** `0xff00…02`: contract-visible root authority, **any-age** (every epoch's committee kept forever).
+- Precompiles:
+  - `0x0100` UC batch check (1..16 claims)
+  - `0x0102` aggregator SMT membership
+  - `0x0104` bridge token-history kernel
+  - `0x0105` composed bridge redemption
+
+---
+
+## PoS contracts (P85)
+
+| Contract | Role |
+|---|---|
+| **StakeCustody** | identities, roles, bond **lots**, key history, exposures, maturity, claims |
+| **ElectionPolicy** | live index, EVM-key binding, election, candidate J + recovery K, PoPs |
+| **Evidence** | objective double-sign evidence, holds, capped penalties |
+| **GovernanceParams** | bounded, prospective parameter changes with a timelock |
+| **RewardPool** | separately funded operator rewards (no minting) |
+| **PosFactory** | atomic, manifest-pinned deployment, then sealed |
+
+No proxy, no `delegatecall` upgrade, no admin withdrawal, no `setModule`. Only claims move funds out.
+
+---
+
+## PoS: implemented
+
+- **Register** with root-key possession → never-reused `StakingID`; separate owner/withdrawal and root/EVM roles.
+- **Bond** native UCT → immutable lot; weight = `⌊principal / 100 UCT⌋`.
+- **Elections** at the cadence: deterministic greedy selection by weight, bounded by churn rules (turnover < 1/3, weight distance, > 2/3 overlap). If no candidate passes, the incumbents continue.
+- **Recovery slate K**: the exact incumbents always ship with candidate J; if J can't acknowledge, K is installed.
+- **Weighted quorum** end to end (root, shards, B1 precompiles).
+- **Retirement** by generation → holds and evidence window → `mature` → `claim`.
+- Rewards, vesting vault, fee collector, governance.
+
+---
+
+## PoS: not implemented, and slashing
+
+**Not implemented:**
+- delegated stake;
+- downtime or absence slashing;
+- jailing;
+- a forced-inclusion inbox for evidence;
+- EVM-domain evidence (it always reverts).
+
+**The one slashable offence:** a root key signs two **distinct** votes for the same `(epoch, round)`.
+- Penalty 1% of exposed principal (lifetime cap 5% per lot); 10% reporter bounty.
+- The penalty goes to treasury. Slashing transfers, never burns.
+- Always: permanent **exclusion** from future elections.
+- A slash never edits the active trust base. Progress never depends on removing an offender.
+
+Not offences: duplicate or re-encoded statements, different rounds, absence from signer sets.
+
+---
+
+## Meta-parameters (dev defaults)
+
+| | staging | production example |
+|---|---|---|
+| committee | 4 (N_max 6, ceiling 16) | — |
+| election cadence | 400 rounds **and** 300 s | 100,000 rounds and 1 week |
+| activation lead | 10 root rounds | 2–1,000 |
+| evidence window / holds | 1,000 / 2,000 rounds | |
+| UC-time floor before exit | 3,600 s | up to 1 week |
+| governance delay | 2,000 rounds and 3,600 s | |
+| rewards | 1 UCT / 1,000 rounds | pool 10,000 UCT |
+
+---
+
+## A logical validator, and how it joins
+
+```
+laptop (colima) ──ssh -R──▶ staging host
+  root · shard · authority · ureth  (one docker "pod")
+```
+
+1. Generate keys: root key, signing keys, EVM key.
+2. `StakeCustody.register(rootKey, pop, withdrawal)`
+3. `StakeCustody.bond(id)` with ≥ 100 UCT
+4. `ElectionPolicy.admitDelegation(...)` binds the EVM key and operator payee (not stake delegation)
+5. Next election → `submitAssignmentPoPs` → handoff → **new UTB entry**
+6. Leave: `requestRetirement(id)` → excluded at the next election → `mature` → `claim`
+
+<!-- TODO(verify): ports and the tunnel layout from research-pos. -->
+
+---
+
+## Native bridge: UCT ⇄ Unicity token
+
+1. **Lock** UCT in the immutable BridgeVault.
+2. **Mint** a token whose mint reason **embeds the full lock proof**: EVM UC + header + MPT proof of the vault slot.
+3. **Transfer** as an ordinary token, or split.
+4. **Burn** naming the EVM recipient.
+5. **Redeem**: anyone submits the history + UCs. `0x0105` verifies it natively and the vault credits the recipient.
+6. **Claim**: pull payment. Invariant `paid ≤ credited ≤ locked`.
+
+The receiver verifies **offline**: the token + local UTB history, no RPC.
+
+---
+
+<!-- _class: small -->
+
+## Native vs bridging to an external EVM chain
+
+| | Native (enshrined EVM) | External chain (unicity-bridge) |
+|---|---|---|
+| Who secures the EVM side | the **same validators** | a foreign consensus |
+| Into Unicity | UC + MPT proof, **instant BFT finality** | wait for source finality (Tron ≈ 1 min, Ethereum ≈ 13 min) |
+| Out of Unicity | EVM **verifies UCs natively** (precompiles) | ZK validity proof, or committee + challenge window |
+| Validator rotation | registry follows every epoch automatically | allow-list update |
+| Light client | none needed | RPC re-check / zk instead |
+| Relayers | optional, permissionless, no authority | post the proof, fee-gated |
+
+The burn side is final at once on both. The hard part is a weak verifier, and here the verifier is not weak.
+
+---
+
+<!-- _class: lead -->
+
+# Demo 1: assets
+
+faucet → lock → mint → send to a phone → burn → redeem → claim
+
+---
+
+<!-- _class: lead -->
+
+# Demo 2: PoS
+
+committee & quorum · laptop joins · validator retires · old token still verifies · forged certificate rejected
+
+---
+
+## Status and caveats
+
+- Pre-production. The P85 design is still "proposed for owner acceptance"; no independent reviewer has been named yet.
+- All host evidence comes from one server and one operator.
+- Bridge profile: `development-provisional-unactivated`.
+- The aggregator is centrally operated at launch (no consistency proofs).
+- Testnet resets mean new networks: one wire format, no migrations.
+
+---
+
+<!-- _paginate: false -->
+
+# Questions
+
+`github.com/ristik/unicity-pos-demo` · `https://pos.staging.unicity.network/demo/`

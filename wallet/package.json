@@ -1,0 +1,14 @@
+{
+  "name": "unicity-pos-demo-wallet",
+  "private": true,
+  "type": "module",
+  "scripts": { "dev": "vite", "build": "tsc --noEmit && vite build", "preview": "vite preview" },
+  "dependencies": {
+    "@noble/curves": "2.2.0",
+    "@noble/hashes": "2.2.0",
+    "@unicitylabs/bridge-core": "file:../vendor/unicitylabs-bridge-core-0.1.0-bridge.2.tgz",
+    "@unicitylabs/native-bridge-plugin": "file:../vendor/unicitylabs-native-bridge-plugin-0.1.0.tgz",
+    "@unicitylabs/state-transition-sdk": "file:../vendor/unicitylabs-state-transition-sdk-4.0.0-utb.c5840ef.tgz"
+  },
+  "devDependencies": { "typescript": "5.9.3", "vite": "7.3.8" }
+}
