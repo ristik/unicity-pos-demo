@@ -96,6 +96,15 @@ async function connect(): Promise<string> {
   if (!pin) throw new Error(`no trust pin: none configured, and ${cfgError}`);
   const r = await bootstrapTrust(agg, pin, settings.network);
   trust = r.trust;
+  if (r.source === 'stored') {
+    // a stored history may be epochs behind (staging hands off every few minutes): catch up before anything verifies against it
+    try {
+      const n = await refreshTrust(trust, agg);
+      if (n > 0) fact('trust refresh', `${n} entries appended to the stored history`);
+    } catch (e) {
+      fact('trust refresh', `failed, keeping the stored history: ${String(e)}`);
+    }
+  }
   fact('trust pin', `${pin} (from ${pinSource})`);
   fact('trust history', `${r.source}, epochs ${trust.history.entries[0].epoch}..${trust.history.tip?.epoch}`);
   if (cfgError) {
@@ -157,7 +166,7 @@ const STEPS: StepDef[] = [
       const t = current()!;
       const l = { nonce: BigInt(t.nonce), amountWei: BigInt(t.amountWei), lockTx: t.lockTx!, lockBlockHash: t.lockBlockHash!, blockNumber: 0n };
       const bytes = await bridge.mint(sess(), me, l, unhex(t.lockProof!));
-      const v = await sess().bridge.verifyNativeTokenBytes(bytes, 'receipt');
+      const v = await bridge.withTrust(sess(), () => sess().bridge.verifyNativeTokenBytes(bytes, 'receipt'));
       update({ phase: 'minted', bytes: hex(bytes), tokenId: hex(v.outcome.tokenId) });
       return `token ${hex(v.outcome.tokenId).slice(0, 12)}…, ${bytes.length} bytes`;
     },
@@ -223,7 +232,7 @@ const handoff = new Handoff(PROFILE, me, {
   },
   token: (m) => void step('receive', async () => {
     fact('from', `tab ${m.from.toUpperCase()}, ${m.bytes.length / 2} bytes`);
-    const { verified } = await acceptToken(sess().bridge, m.bytes, me.publicKey);
+    const { verified } = await bridge.withTrust(sess(), () => acceptToken(sess().bridge, m.bytes, me.publicKey));
     const tokenId = hex(verified.outcome.tokenId);
     fact('verified', `token ${tokenId}, lock nonce ${verified.outcome.nonce}, owner = this key`);
     const id = `rx-${tokenId.slice(0, 12)}`;
