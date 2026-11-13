@@ -6,7 +6,7 @@ title: Unicity PoS staging: the stack and a live demo
 style: |
   section { font-size: 24px; }
   section.small { font-size: 19px; }
-  table { font-size: 0.85em; }
+  table { font-size: 0.8em; }
   code { font-size: 0.9em; }
   .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2em; }
 ---
@@ -57,7 +57,8 @@ the stack · contracts · bridge · tested limits · what we fixed upstream
 ```
 
 - One security principal per validator: root key and EVM key are different keys bound to one identity.
-- No separate settlement chain. Certification means "the honest majority executed this" (no ZK).
+- Shard node is protocol adapter: shard protocol for bft-core, engine api (emulates evm consensus client) for reth
+- We already assume 2/3 honest majority of bft-core; then it is fine to trust that 1/2 of co-hosted EVM execution clients are trusted
 
 ---
 
@@ -77,7 +78,7 @@ the stack · contracts · bridge · tested limits · what we fixed upstream
 
 | | |
 |---|---|
-| Host | 1 bare-metal server, 12 cores |
+| Host | 1 bare-metal server, 6 cores |
 | Validators | 5, weight 1 each (4 on the host + this laptop) |
 | Chain ID | `5587796` = `0x554354` = "UCT" |
 | Elections | every 3,600 rounds **and** 1,800 s (≈30 min) |
@@ -132,14 +133,14 @@ Forks keep `main` as the upstream-sync branch. UTB v2 is merged upstream: bft-go
 | mint / transfer / burn | aggregator `submitCertificationRequest`, `getInclusionProof` |
 | trust | `getTrustBasePage` → local `TrustBaseHistory`, refreshed on `ErrNoEntryForEpoch` |
 | return proof | aggregator consolidation: the burned token's proofs under **one** seal |
-| redeem / claim | `BridgeVault.redeem(bytes)` → precompile `0x0105`; then `claim(uint256,address)` |
+| redeem/claim | `BridgeVault.redeem(bytes)` → precompile `0x0105`; then `claim(uint256,address)` |
 | PoS view | `eth_call` views only: `StakeCustody`, `ElectionPolicy`, `SealRegistry` record log |
 
 The public `/rpc` is allow-listed: no `eth_getLogs`, no `eth_getProof`, no batches. The visualizer rebuilds history from the registry record log.
 
 ---
 
-## Inside ureth: every block starts with a protocol prefix
+## ureth block: protocol specific prefix
 
 1. registry `open` → 2. registry `finalize` → 3. EIP-4788 hook → 4. control-record import → 5. PoS hooks (reconcile, governance, **election**) → 6. user transactions
 
@@ -180,7 +181,7 @@ No proxy, no `delegatecall` upgrade, no admin withdrawal, no `setModule`. Only c
 
 ---
 
-## PoS: not implemented, and slashing
+## PoS: not implemented
 
 **Not implemented:**
 - delegated stake;
@@ -189,13 +190,13 @@ No proxy, no `delegatecall` upgrade, no admin withdrawal, no `setModule`. Only c
 - a forced-inclusion inbox for evidence;
 - EVM-domain evidence (it always reverts).
 
-**The one slashable offence:** a root key signs two **distinct** votes for the same `(epoch, round)`.
+**Only one slashing case:** a root key signs two **distinct** votes for the same `(epoch, round)`.
 - Penalty 1% of exposed principal (lifetime cap 5% per lot); 10% reporter bounty.
 - The penalty goes to treasury. Slashing transfers, never burns.
 - Always: permanent **exclusion** from future elections.
 - A slash never edits the active trust base. Progress never depends on removing an offender.
 
-Not offences: duplicate or re-encoded statements, different rounds, absence from signer sets.
+No slashing: duplicate or re-encoded statements, different rounds, absence from signer sets.
 
 ---
 
@@ -213,15 +214,15 @@ Not offences: duplicate or re-encoded statements, different rounds, absence from
 
 ---
 
-## A logical validator, and how it joins
+## A logical validator; joining flow
 
-```
+<!-- ```
 laptop (colima, pod5)                       staging host
  root5 · shard5 · authority5 · ureth5
    peer stubs root1-4 / shard1-4 / ureth1-4 ─ssh -L─▶ root1-4:8000, shard1-4:9000, ureth1-4:8545
    root5:8000, shard5:9000, agent :28700   ◀─ssh -R─  laptop-relay container (validators net)
 ```
-One `ssh -N`, no listener on the host (`GatewayPorts no` stays). Peer ports are libp2p, authenticated by peer id.
+One `ssh -N`, no listener on the host (`GatewayPorts no` stays). Peer ports are libp2p, authenticated by peer id. -->
 
 1. Generate keys: root key, signing keys, EVM key.
 2. `StakeCustody.register(rootKey, pop, withdrawal)`
@@ -230,7 +231,7 @@ One `ssh -N`, no listener on the host (`GatewayPorts no` stays). Peer ports are 
 5. Next election → `submitAssignmentPoPs` → handoff → **new UTB entry**
 6. Leave: `requestRetirement(id)` → excluded at the next election → `mature` → `claim`
 
-Keys stay in the laptop's memory: sleep the laptop or restart colima and that validator is gone.
+In-memory keys: restart colima/docler and that validator is gone.
 
 Measured (2026-11-13): register + bond + prepare **24 s** → wait for the election (≤ 30 min) → root signs **~2 min** later → shard signs after a full restore (**~14 min** at 2.6k blocks: archive fetch plus replay, grows with chain length). Retirement (rehearsed on the previous generation): request → excluded at the next election → the handoff back to 4 itself takes **~3 min**; the wait for the election is up to one cadence (30 min here). A remote member over the tunnel costs ~5–10 % throughput.
 
@@ -273,7 +274,7 @@ The burn side is final at once on both. The hard part is a weak verifier, and he
 | What | Result |
 |---|---|
 | **16 / 32 / 64 roots** | all controls pass: progress, rejoin, quorum-minus-one stall, resume (34–38 rounds/min) |
-| **128 roots** | "can pass, not reliably": all controls passed in 4/7 fresh runs. The stall at quorum−1 always holds; **resume** after quorum returns is what fails (#982 open). Load average up to 159 on 12 cores |
+| **128 roots** | "can pass, not reliably": all controls passed in 4/7 fresh runs. The stall at quorum−1 always holds; **resume** after quorum returns is what fails (#982 open). Load average up to 159 on 6 cores |
 | where the CPU goes at 128 | 81–94 % secp256k1 verification. Timeout messages are 83–85 % of loop time and O(n²): 16,256 sends per round. Caches #984/#992 cut per-message cost 10–40×, but storms remain |
 | committee ceiling **16** | a gas/pricing ceiling (precompiles, registry), not consensus: native bounds are 256. The PoS package caps elected members at 6 |
 | election hook gas | 5.4 M at 16 candidates → 64.6 M at 128 candidates / 32 elected (52 % of system gas) |
@@ -281,33 +282,6 @@ The burn side is final at once on both. The hard part is a weak verifier, and he
 | bridge redemption | 1,000 leaves: 1.45 MB, 48 M gas, 389 ms native → 60 M block capacity, 2 MiB envelope |
 | round-time tail | 0.28 % of rounds > 1 s (max 1.86 s), planning envelope ρ = 2.3 s; leader rescue < 75 s in 12/12 windows |
 | archive growth | ≈6.4 KiB per EVM block |
-
-Not covered yet: WAN, a second operator, live unequal weights, sustained load, multi-host.
-
----
-
-## A limit we found this week: staging stall
-
-- `tn-pos-staging-20261111` ran **≈20 h**, then stopped at EVM block 42,832.
-- **Memory:** each 512 MiB shard container filled with ≈490 MiB of kernel inode/dentry cache from the archive's **one-directory-per-block** layout (471 k files per validator). The shards swapped, block rate fell from 2,800/h to 340/h, and one validator dropped out.
-- **Wedge:** with 3 of 4 left, every failed round journaled another candidate at the same height. At the cap of 32, every proposal was refused, permanently.
-- **Fixes:**
-  - sizing 2 GiB / 1.5 CPU / 256 (#1020);
-  - evict superseded same-height candidates (#1019);
-  - pack the archive layout.
-
-Lesson: the roots and aggregator stayed healthy the whole time. The weak spot was resource sizing at the EVM shard.
-
----
-
-## And one more, last night: roots throttled as epochs grew
-
-- The previous generation `tn-pos-staging-20261113`, with a handoff every ~8 min, slowed **0.62 → 0.15 blocks/s** in 5.5 h (epochs 1 → 34).
-- **Roots were capped at 0.5 CPU** and throttled 34 % of the time. Root work per certification request grows with the epoch count. Leading suspect from code reading (not yet measured): the request history is rebuilt from genesis on each request (#1032).
-- Slow roots dropped shard requests that arrived one round "early" (`expected round N, got N+1`), and 26 % of shard rounds timed out.
-- **Live fix:** `docker update --cpus 2` with no restart → 0.46 blocks/s. **Package fix:** `--root-cpus` (#1031). **Mitigation:** 30-min elections. **Code fix:** cache the history (#1032, open).
-
-Lesson: per-epoch costs only show up after many epochs; soak with a fast cadence.
 
 ---
 
@@ -327,7 +301,7 @@ Lesson: per-epoch costs only show up after many epochs; soak with a fast cadence
 - EVM shard: 3-of-4 livelock (#728); crash recovery from the archive (#843); paged rejoin (#769).
 
 **Performance**
-- Verified QC/TC cache: 78–99 % hit rate at 128 roots (#992). Timeout replay cache, 10–40× (#984).
+- Verified QC/TC cache: 78–99 % hit rate at 128 roots (#992). Timeout replay cache, 10–40× speedup vs. upstream (#984).
 - UC-consolidation work made asymptotically cheaper in Go, the aggregator and the SDKs. Merged upstream: bft-go-base#9, bft-core#33, aggregator-go#208, sdk-js/rust.
 - Journal load memo: whole-journal re-verification no longer repeats about 5 times a second (#749).
 
