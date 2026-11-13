@@ -27,7 +27,7 @@ Live demo on `pos.staging.unicity.network`
 
 1. **The setup**: what runs on the staging network, its endpoints and repos.
 2. **Assets demo**: UCT from the faucet → bridged to a Unicity token → sent to a second wallet (another tab) → bridged back.
-3. **PoS demo**: committee, stakes and quorum, live. Then this laptop **joins as a validator**, an old validator **retires**, and an old token **still verifies**.
+3. **PoS demo**: committee, stakes and quorum, live. This laptop **is validator 5** (joined this morning); an old-epoch token **still verifies**, a forged one is rejected.
 4. **How it works underneath**: contracts, logical validator, bridge vs bridging to an external chain.
 
 Everything in the demo runs in a browser: no install, a burner key, public endpoints only.
@@ -80,7 +80,7 @@ the stack · contracts · bridge · tested limits · what we fixed upstream
 | Host | 1 bare-metal server, 12 cores |
 | Validators | 4, weight 1 each |
 | Chain ID | `5587796` = `0x554354` = "UCT" |
-| Elections | every 400 rounds **and** 300 s |
+| Elections | every 3,600 rounds **and** 1,800 s (≈30 min) |
 | Bond unit / min bond | 100 UCT |
 | Containers | 31 |
 
@@ -204,7 +204,7 @@ Not offences: duplicate or re-encoded statements, different rounds, absence from
 | | staging | production example |
 |---|---|---|
 | committee | 4 (N_max 6, ceiling 16) | — |
-| election cadence | 400 rounds **and** 300 s | 100,000 rounds and 1 week |
+| election cadence | 3,600 rounds **and** 1,800 s | 100,000 rounds and 1 week |
 | activation lead | 10 root rounds | 2–1,000 |
 | evidence window / holds | 1,000 / 2,000 rounds | |
 | UC-time floor before exit | 3,600 s | up to 1 week |
@@ -230,7 +230,9 @@ One `ssh -N`, no listener on the host (`GatewayPorts no` stays). Peer ports are 
 5. Next election → `submitAssignmentPoPs` → handoff → **new UTB entry**
 6. Leave: `requestRetirement(id)` → excluded at the next election → `mature` → `claim`
 
-Keys stay in the laptop's memory: sleep the laptop or restart colima and that validator is gone. Late joiners replay the chain (~4 blocks/s).
+Keys stay in the laptop's memory: sleep the laptop or restart colima and that validator is gone.
+
+Measured (2026-11-13): register + bond + prepare **24 s** → wait for the election (≤ 30 min) → root signs **~2 min** later → shard signs after a full restore (**~14 min** at 2.6k blocks; grows with chain length, ~7 blocks/s). Retirement: request → excluded at the next election → handoff back to 4 in **~5 min**. A remote member over the tunnel costs ~5–10 % throughput.
 
 ---
 
@@ -298,6 +300,17 @@ Lesson: the roots and aggregator stayed healthy the whole time. The weak spot wa
 
 ---
 
+## And one more, last night: roots throttled as epochs grew
+
+- The next generation, with a handoff every ~8 min, slowed **0.62 → 0.15 blocks/s** in 5.5 h (epochs 1 → 34).
+- **Roots were capped at 0.5 CPU** and throttled 34 % of the time. Root work per certification request grows with the epoch count: the request history is rebuilt from genesis on each request (#1032).
+- Slow roots dropped shard requests that arrived one round "early" (`expected round N, got N+1`), and 26 % of shard rounds timed out.
+- **Live fix:** `docker update --cpus 2` with no restart → 0.46 blocks/s. **Package fix:** `--root-cpus` (#1031). **Mitigation:** 30-min elections. **Code fix:** cache the history (#1032, open).
+
+Lesson: per-epoch costs only show up after many epochs; soak with a fast cadence.
+
+---
+
 <!-- _class: small -->
 
 ## Fixes and improvements on top of upstream (not PoS)
@@ -356,7 +369,7 @@ faucet → lock → mint → send to tab B → burn → redeem → claim
 
 # Demo 2: PoS
 
-committee & quorum · laptop joins · validator retires · old token still verifies · forged certificate rejected
+committee & quorum · laptop is validator 5 · old token still verifies · forged certificate rejected
 
 ---
 
