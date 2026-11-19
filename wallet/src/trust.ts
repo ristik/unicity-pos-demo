@@ -7,10 +7,7 @@ import { NetworkId } from '@unicitylabs/state-transition-sdk/lib/api/NetworkId.j
 import { TRUST_BASE_PAGE_LIMITS } from '@unicitylabs/state-transition-sdk/lib/api/bft/trustbase/TrustBaseRange.js';
 import { TrustBaseHistory } from '@unicitylabs/state-transition-sdk/lib/api/bft/trustbase/TrustBaseHistory.js';
 import { TrustBaseUpdater } from '@unicitylabs/state-transition-sdk/lib/api/bft/trustbase/TrustBaseUpdater.js';
-import { findNoTrustBaseEntry } from '@unicitylabs/state-transition-sdk/lib/api/bft/verification/TrustBaseEntryResult.js';
-import { ConsolidationError } from '@unicitylabs/state-transition-sdk/lib/consolidation/ConsolidationError.js';
-import { VerificationResult } from '@unicitylabs/state-transition-sdk/lib/verification/VerificationResult.js';
-import { NativeError, TrustInput } from '@unicitylabs/native-bridge-plugin';
+import { TrustInput } from '@unicitylabs/native-bridge-plugin';
 
 import { hex, unhex } from './hex.js';
 import { load, save } from './store.js';
@@ -36,10 +33,13 @@ const persist = async (trust: TrustInput): Promise<void> => {
 };
 
 /**
- * The held history: the stored bundle when it is under the same pin, else fetched from the aggregator from epoch 1. A complete first page
- * decodes as a bundle; otherwise the SDK's updater pages through from the genesis.
+ * The held history: the stored bundle when it is under the same pin, else the operator's shipped bundle (nb2-release.json's, when given),
+ * else fetched from the aggregator from epoch 1. A complete first page decodes as a bundle; otherwise the SDK's updater pages through from
+ * the genesis. Every source is verified under the pin: the shipped bundle is only a convenience, never the trust root. When both a stored
+ * history and a shipped bundle exist, the shipped entries are appended to the stored history (a held epoch with the same EntryID is a replay,
+ * a conflicting one is refused: the history is never replaced).
  */
-export async function bootstrapTrust(agg: AggregatorClient, pinHex: string, network: number, ns = ''): Promise<{ trust: TrustInput; source: 'stored' | 'fetched' }> {
+export async function bootstrapTrust(agg: AggregatorClient, pinHex: string, network: number, ns = '', shipped?: Uint8Array): Promise<{ trust: TrustInput; source: 'stored' | 'shipped' | 'fetched' }> {
   const pin = unhex(pinHex);
   if (pin.length !== 32) throw new Error('the trust pin must be a 32-byte genesis EntryID');
   const stored = load(`${ns}trust.bundle`);
@@ -47,23 +47,34 @@ export async function bootstrapTrust(agg: AggregatorClient, pinHex: string, netw
     try {
       const trust = await TrustInput.fromBundle(unhex(stored), pin);
       namespaces.set(trust, ns);
+      if (shipped) {
+        const s = await TrustInput.fromBundle(shipped, pin);
+        for (const e of s.history.entries) await trust.history.append(e);
+        await persist(trust);
+      }
       return { trust, source: 'stored' };
     } catch {
-      /* a stale or damaged copy: fetch again */
+      /* a stale or damaged copy: start over */
     }
   }
   const net = NetworkId.fromId(network);
   let trust: TrustInput;
-  try {
-    trust = await TrustInput.fromBundle(await agg.getTrustBasePage({ fromEpoch: 1n, maxEntries: 64, network: net, snapshot: null }), pin);
-  } catch {
-    const history = TrustBaseHistory.create(pin);
-    await TrustBaseUpdater.update(history, [agg], { network: net, limits: { ...TRUST_BASE_PAGE_LIMITS, maxEntries: 64 } });
-    trust = await TrustInput.fromBundle(await history.toBundle(), pin);
+  let source: 'shipped' | 'fetched' = 'shipped';
+  if (shipped) {
+    trust = await TrustInput.fromBundle(shipped, pin);
+  } else {
+    source = 'fetched';
+    try {
+      trust = await TrustInput.fromBundle(await agg.getTrustBasePage({ fromEpoch: 1n, maxEntries: 64, network: net, snapshot: null }), pin);
+    } catch {
+      const history = TrustBaseHistory.create(pin);
+      await TrustBaseUpdater.update(history, [agg], { network: net, limits: { ...TRUST_BASE_PAGE_LIMITS, maxEntries: 64 } });
+      trust = await TrustInput.fromBundle(await history.toBundle(), pin);
+    }
   }
   namespaces.set(trust, ns);
   await persist(trust);
-  return { trust, source: 'fetched' };
+  return { trust, source };
 }
 
 /** Fetch the entries after the held tip (each authenticated from its predecessor) and persist; returns how many were appended. */
@@ -91,30 +102,4 @@ export async function entries(trust: TrustInput): Promise<EntryView[]> {
     totalWeight: e.totalWeight,
     members: e.members.map((m) => ({ nodeId: m.nodeId, weight: m.weight, key: hex(m.sigKey) })),
   })));
-}
-
-/**
- * True when a verification failed only for want of a newer trust-base entry: the plug-in's ErrNoEntryForEpoch, or an SDK consolidation
- * integrity error whose trace names a missing epoch (nbp src/trustrefresh.ts needsNewerEntry; that module is not in the package's exports).
- */
-export function needsNewerEntry(e: unknown): boolean {
-  if (e instanceof NativeError) return e.reason === 'ErrNoEntryForEpoch';
-  return e instanceof ConsolidationError && e.kind === 'integrity' && e.cause instanceof VerificationResult && findNoTrustBaseEntry(e.cause) !== null;
-}
-
-/**
- * Run `verify`; while it fails for want of a newer entry, fetch the entries after the held tip, persist them and run it again (at most
- * `attempts` runs). `verify` must only verify: a retry never resubmits anything. A port of nbp src/trustrefresh.ts withTrustRefresh.
- */
-export async function withTrustRefresh<T>(trust: TrustInput, agg: AggregatorClient, verify: () => Promise<T>, onFetch?: (appended: number, tip: bigint) => void, attempts = 6): Promise<T> {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      return await verify();
-    } catch (e) {
-      if (!needsNewerEntry(e) || attempt >= attempts) throw e;
-    }
-    const n = await refreshTrust(trust, agg);
-    onFetch?.(n, trust.history.tip?.epoch ?? 0n);
-    if (n === 0) await new Promise((r) => setTimeout(r, 2000));
-  }
 }

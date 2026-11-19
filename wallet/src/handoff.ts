@@ -2,12 +2,10 @@
  * Two tabs of one browser hand a token over a BroadcastChannel (no server, no relay). The receiver announces its public key; the sender
  * transfers the token to that key on the aggregator and posts the token file; the receiver verifies it offline and checks it is the owner.
  */
-import type { NativeBridge, VerifiedToken } from '@unicitylabs/native-bridge-plugin';
-import { Token } from '@unicitylabs/state-transition-sdk/lib/transaction/Token.js';
+import type { NativeBridgeV2 } from '@unicitylabs/native-bridge-plugin/nb2';
 
 import { isAddress } from './evm.js';
 import { eqBytes, hex, unhex } from './hex.js';
-import { predicateOf } from './keys.js';
 
 export type Message =
   | { type: 'hello'; from: string; publicKey: string; evmAddress: string }
@@ -83,12 +81,13 @@ export class Handoff {
   }
 }
 
-/** The receiver's check: the plug-in verifies the whole token offline ('receipt': held, not burned), and its current owner is this key. */
-export async function acceptToken(bridge: NativeBridge, bytesHex: string, myPublicKey: Uint8Array): Promise<{ bytes: Uint8Array; verified: VerifiedToken }> {
+/**
+ * The receiver's check: the plug-in verifies the whole token offline (its receipt-backed origin, its lineage and every certificate under the held
+ * trust history; nothing is sent), and its current owner is this key.
+ */
+export async function acceptToken(bridge: NativeBridgeV2, bytesHex: string, myPublicKey: Uint8Array): Promise<{ bytes: Uint8Array; verified: { tokenId: Uint8Array; amount: bigint; owner: Uint8Array | null } }> {
   const bytes = unhex(bytesHex);
-  const verified = await bridge.verifyNativeTokenBytes(bytes, 'receipt');
-  const token = await Token.fromCBOR(bytes);
-  const owner = (token.transactions.at(-1) ?? token.genesis).recipient.toCBOR();
-  if (!eqBytes(owner, predicateOf(myPublicKey))) throw new Error('the token verifies, but its owner is another key: not addressed to this wallet');
+  const verified = await bridge.verifyToken(bytes);
+  if (verified.owner === null || !eqBytes(verified.owner, myPublicKey)) throw new Error('the token verifies, but its owner is another key: not addressed to this wallet');
   return { bytes, verified };
 }

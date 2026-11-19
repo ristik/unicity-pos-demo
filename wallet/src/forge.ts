@@ -1,23 +1,19 @@
 /**
- * The old-epoch check and two forgeries of a held token's certificates.
+ * The old-epoch check and two forgeries of a held token's certificates (native bridge v2 tokens: the plug-in's own token codec, `decodeToken`).
  *
  * - Each certificate's seal names its root epoch and round; the verifier picks that epoch's committee from the held history and checks the
  *   round lies in the epoch's interval [start, next start). So a token sealed in an old epoch still verifies after rotations.
- * - Unknown keys: the seal re-signed by fresh keys under the same signer ids (bridge-tester.ts unknownKeyCertificate) → ErrQuorumNotMet.
+ * - Unknown keys: the seal re-signed by fresh keys under the same signer ids → QuorumNotMet.
  * - Re-labelled epoch: the genuine seal and signatures, with its epoch/round moved outside the named epoch's interval (what a retired committee
- *   signing after its end looks like) → ErrSealEpoch, refused before any signature is checked.
+ *   signing after its end looks like) → SealEpoch, refused before any signature is checked.
  */
-import type { NativeBridge, TrustInput } from '@unicitylabs/native-bridge-plugin';
-import { NativeError } from '@unicitylabs/native-bridge-plugin';
-import { InclusionProof } from '@unicitylabs/state-transition-sdk/lib/api/InclusionProof.js';
+import type { TrustInput } from '@unicitylabs/native-bridge-plugin';
+import { Nb2Error, decodeToken, encodeToken, lineageOf, type NativeBridgeV2, type Token } from '@unicitylabs/native-bridge-plugin/nb2';
 import { UnicityCertificate } from '@unicitylabs/state-transition-sdk/lib/api/bft/UnicityCertificate.js';
 import { UnicitySeal } from '@unicitylabs/state-transition-sdk/lib/api/bft/UnicitySeal.js';
 import { SigningService } from '@unicitylabs/state-transition-sdk/lib/crypto/secp256k1/SigningService.js';
 import { CborDeserializer as D } from '@unicitylabs/state-transition-sdk/lib/serialization/cbor/CborDeserializer.js';
 import { CborSerializer as C } from '@unicitylabs/state-transition-sdk/lib/serialization/cbor/CborSerializer.js';
-import { Token } from '@unicitylabs/state-transition-sdk/lib/transaction/Token.js';
-
-import { hex } from './hex.js';
 
 export interface SealRow {
   step: string;
@@ -28,49 +24,54 @@ export interface SealRow {
   inInterval: boolean;
 }
 
-const proofsOf = (t: Token): InclusionProof[] => [t.genesis, ...t.transactions].map((c) => c.inclusionProof);
+/** Every inclusion proof's raw certificate of a token and its lineage (a split part carries its parents'), root first, with a label. */
+function certificatesOf(token: Token): { step: string; uc: Uint8Array }[] {
+  const chain = lineageOf(token);
+  const out: { step: string; uc: Uint8Array }[] = [];
+  chain.forEach((t, level) => {
+    const where = chain.length === 1 ? '' : level === chain.length - 1 ? 'part ' : level === 0 ? 'root ' : `split ${level} `;
+    out.push({ step: `${where}mint`, uc: t.mintProof.uc });
+    t.proofs.forEach((p, i) => out.push({ step: `${where}tx ${i + 1}`, uc: p.uc }));
+  });
+  return out;
+}
 
-/** Per certificate of the token: its seal's epoch and round against the held history's entries. */
+/** Per certificate of the token and its lineage: its seal's epoch and round against the held history's entries. */
 export async function sealTable(bytes: Uint8Array, trust: TrustInput): Promise<SealRow[]> {
-  const token = await Token.fromCBOR(bytes);
   const h = trust.history;
-  return proofsOf(token).map((p, i) => {
-    const { epoch, rootChainRoundNumber: round } = p.unicityCertificate.unicitySeal;
+  return certificatesOf(decodeToken(bytes)).map(({ step, uc }) => {
+    const { epoch, rootChainRoundNumber: round } = UnicityCertificate.fromCBOR(uc).unicitySeal;
     const e = h.entryForEpoch(epoch);
     const entry = e ? { start: e.epochStartRound, end: h.epochEndRound(epoch) } : null;
-    return { step: i === 0 ? 'mint' : `tx ${i}`, epoch, round, entry, inInterval: !!entry && round >= entry.start && (entry.end === null || round < entry.end) };
+    return { step, epoch, round, entry, inInterval: !!entry && round >= entry.start && (entry.end === null || round < entry.end) };
   });
 }
 
-/** The verdict of the plug-in on a token file: ok, or the refusal's reason (ErrQuorumNotMet, ErrSealEpoch, ...). */
-export async function verdict(bridge: NativeBridge, bytes: Uint8Array): Promise<{ ok: true } | { ok: false; reason: string; detail: string }> {
+/** The plug-in's verdict on a token file (offline, whole lineage): ok, or the refusal's rule (QuorumNotMet, SealEpoch, ...). */
+export async function verdict(bridge: NativeBridgeV2, bytes: Uint8Array): Promise<{ ok: true } | { ok: false; reason: string; detail: string }> {
   try {
-    await bridge.verifyNativeTokenBytes(bytes, 'receipt');
+    await bridge.verifyToken(bytes);
     return { ok: true };
   } catch (e) {
-    if (e instanceof NativeError) return { ok: false, reason: e.reason, detail: e.detail ?? e.message };
+    if (e instanceof Nb2Error) return { ok: false, reason: e.rule, detail: e.message };
     return { ok: false, reason: (e as Error).name ?? 'Error', detail: String(e) };
   }
 }
 
-/** The token file with every proof's certificate replaced by `mutate(certificate)` (same transactions, same inclusion paths). */
+/** The token file with every proof's certificate of the part itself (not its lineage) replaced by `mutate(certificate)`. */
 async function withCertificates(bytes: Uint8Array, mutate: (uc: UnicityCertificate) => Promise<UnicityCertificate>): Promise<Uint8Array> {
-  const tagged = D.decodeTag(bytes);
-  const [version, genesis, txs] = D.decodeArray(tagged.data, 3);
-  const token = await Token.fromCBOR(bytes);
-  const cache = new Map<string, UnicityCertificate>();
-  const swap = async (p: InclusionProof): Promise<Uint8Array> => {
-    const k = hex(p.unicityCertificate.toCBOR());
-    if (!cache.has(k)) cache.set(k, await mutate(p.unicityCertificate));
-    return new InclusionProof(p.certificationData, p.referenceTime, p.inclusionCertificate, cache.get(k)!).toCBOR();
+  const t = decodeToken(bytes);
+  const cache = new Map<string, Uint8Array>();
+  const swap = async (raw: Uint8Array): Promise<Uint8Array> => {
+    const k = Array.from(raw, (x) => x.toString(16).padStart(2, '0')).join('');
+    if (!cache.has(k)) cache.set(k, (await mutate(UnicityCertificate.fromCBOR(raw))).toCBOR());
+    return cache.get(k)!;
   };
-  const [mintTx] = D.decodeArray(genesis, 2);
-  const rest = D.decodeArray(txs);
-  const certified = [arr2(mintTx, await swap(token.genesis.inclusionProof))];
-  for (let i = 0; i < rest.length; i++) certified.push(arr2(D.decodeArray(rest[i], 2)[0], await swap(token.transactions[i].inclusionProof)));
-  return C.encodeTag(tagged.tag, C.encodeArray(version, certified[0], C.encodeArray(...certified.slice(1))));
+  const mintProof = { ...t.mintProof, uc: await swap(t.mintProof.uc) };
+  const proofs = [];
+  for (const p of t.proofs) proofs.push({ ...p, uc: await swap(p.uc) });
+  return encodeToken({ ...t, mintProof, proofs });
 }
-const arr2 = (a: Uint8Array, b: Uint8Array): Uint8Array => C.encodeArray(a, b);
 
 /** The certificate with its seal re-signed by fresh keys under the same signer ids: keys no trust-base entry ever held. */
 export async function unknownKeyCertificate(uc: UnicityCertificate): Promise<UnicityCertificate> {
