@@ -73,7 +73,7 @@ export function outputCard(m: VrModel, logs: VrLogs, d: Deps): HTMLElement {
   const open = b.open;
   return d.card('Output and boundary', 'what the roots acknowledge', 'vr-output',
     h('div', { class: 'stats' },
-      d.stat(open ? 'open output' : 'last acknowledged output', out ? d.badge(VR_OUTPUT_STATE[Number(out.state)] ?? String(out.state), open ? 'warn' : 'good') : 'none yet', out ? `attempt ${out.attempt} · ${out.native ? 'registry-native' : 'from the module'}` : 'the genesis committee is in force'),
+      d.stat(open ? 'open output' : 'last acknowledged output', out && out.state !== 0n ? d.badge(VR_OUTPUT_STATE[Number(out.state)] ?? String(out.state), open ? 'warn' : 'good') : 'none yet', out && out.state !== 0n ? `attempt ${out.attempt} · ${out.native ? 'registry-native' : 'from the module'}` : 'the genesis committee is in force'),
       d.stat('records', `${m.recordCursor} / ${m.recordCount}`, 'applied / imported root records'),
       d.stat('next boundary', b.open ? 'output open' : b.workPending ? (b.roundsToGo > 0n ? `in ${b.roundsToGo} rounds` : 'due now') : 'no work', `gate at progress ${b.dueProgress} (epoch start ${m.cfg.epochStartProgress} + ${MIN_EPOCH_GAP})`)),
     h('p', { class: 'what' }, b.text),

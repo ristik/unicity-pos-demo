@@ -493,7 +493,7 @@ function header(): HTMLElement {
 }
 
 const root = document.getElementById('app')!;
-const slots = { header: h('div'), vrNote: h('div', { class: 'wide' }), vrModule: h('div'), vrOutput: h('div'), vrGov: h('div'), vrIdent: h('div', { class: 'wide' }), vrConfig: h('div'), vrCustody: h('div'), committee: h('div', { class: 'wide' }), election: h('div'), params: h('div'), identities: h('div', { class: 'wide' }), utb: h('div', { class: 'wide' }) };
+const slots = { header: h('div'), vrNote: h('div', { class: 'wide' }), vrModule: h('div'), vrOutput: h('div'), vrGov: h('div', { class: 'wide' }), vrIdent: h('div', { class: 'wide' }), vrConfig: h('div', { class: 'wide' }), vrCustody: h('div'), committee: h('div', { class: 'wide' }), election: h('div'), params: h('div'), identities: h('div', { class: 'wide' }), utb: h('div', { class: 'wide' }) };
 root.replaceChildren(slots.header, h('main', { class: 'pos' }, slots.vrNote, slots.vrModule, slots.vrOutput, slots.vrGov, slots.vrConfig, slots.vrIdent, slots.vrCustody, slots.committee, slots.election, slots.params, slots.identities, slots.utb),
   h('p', { class: 'footer' }, 'Read-only: eth_call against latest and GET /api/v1/trustbases, one request at a time. What-if panels are local arithmetic.'));
 
