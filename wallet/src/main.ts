@@ -344,7 +344,7 @@ const STEPS: StepDef[] = [
   {
     key: 'burn', title: 'Burn for return', phase: ['minted'], when: (t) => !t.pending, what: 'The preflight runs again on fresh chain state, then the burn is certified: it signs the recipient, the amount and the index a, and its redemption ID eta is fixed from here on. The burn is irreversible.',
     input: () => recipientInput,
-    note: (t) => (t?.burning ? 'A burn of this token is in progress: Run resumes it with the same request.' : t?.returnId ? `Planned return ${t.returnId.slice(0, 14)}… to ${t.recipient}.` : undefined),
+    note: (t) => (t?.phase !== 'minted' ? undefined : t.burning ? 'A burn of this token is in progress: Run resumes it with the same request.' : t.returnId ? `Planned return ${t.returnId.slice(0, 14)}… to ${t.recipient}.` : undefined),
     run: async () => {
       const t = currentOr('select a token');
       const s = sess();
@@ -570,7 +570,7 @@ function identityCard(): HTMLElement {
 }
 
 /**
- * A plain value transfer, so the other tab can pay gas for its own redeem and claim. The sent tx is stored until its receipt is read: while
+ * A plain value transfer, so the other tab can pay gas for its own redeem. The sent tx is stored until its receipt is read: while
  * it is, the button polls that transaction instead of sending another.
  */
 function fundPeer(): HTMLElement | string {

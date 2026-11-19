@@ -13,11 +13,12 @@
 //   deployment         print the bridge deployment card      flow        print the asset-flow card
 //   size | dark        laptop viewport | dark color scheme   shot:<file> PNG screenshot
 //   wait:<seconds>     sleep                                 dump        print the page text
+//   reload             reload the page (the journal and token records are in IndexedDB: a step resumes after it)
 //
 // Tab `pos` opens the PoS visualizer (<base>pos.html), where `dump`, `shot:<file>` and `text:<css selector>` apply.
 //
 // Env: CHROME (browser binary), CHROME_ARGS (extra flags, space separated), PROFILE_DIR (browser profile; keep it to resume a flow, since keys and tokens live in its localStorage),
-// CDP_PORT (default 9333), CONSOLE=1 (echo the page's console).
+// CDP_PORT (default 9333), CONSOLE=1 (echo the page's console), FLUSH_MS (wait before the browser is closed; default 6000).
 import { spawn } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -179,6 +180,10 @@ for (const c of cmds) {
       console.log('screenshot', arg);
       break;
     }
+    case 'reload':
+      await t.send('Page.reload');
+      await sleep(1500);
+      break;
     case 'wait':
       await sleep(Number(arg) * 1000);
       break;
@@ -189,6 +194,9 @@ for (const c of cmds) {
       throw new Error(`unknown command ${c}`);
   }
 }
+// Chromium commits localStorage about 5 s after a write: give a key just created time to reach the disk before the browser goes away
+// (a hard kill in that window loses it, the wallet's documented limitation). FLUSH_MS=0 skips the wait for runs that created no key.
+await sleep(Number(process.env.FLUSH_MS ?? 6000));
 for (const t of Object.values(tabs)) t.close();
 chrome.kill();
 process.exit(failed ? 1 : 0);
