@@ -331,7 +331,7 @@ const STEPS: StepDef[] = [
     run: () => verifyOne(currentOr('select a token').id),
   },
   {
-    key: 'plan', title: 'Plan return (preflight)', phase: ['minted'], when: (t) => !t.burning, what: 'Nothing is burned. The plug-in verifies the part\'s whole provenance, takes the burn index a from the newest verified SegmentSealed receipt, and checks that the complete future redemption fits the transaction-size limit and userGasLimit with the reserve, and that this key can pay the worst-case gas.',
+    key: 'plan', title: 'Plan return (preflight)', phase: ['minted'], when: spendable, what: 'Nothing is burned. The plug-in verifies the part\'s whole provenance, takes the burn index a from the newest verified SegmentSealed receipt, and checks that the complete future redemption fits the transaction-size limit and userGasLimit with the reserve, and that this key can pay the worst-case gas.',
     input: () => recipientInput,
     run: async () => {
       const t = currentOr('select a token');
@@ -342,7 +342,7 @@ const STEPS: StepDef[] = [
     },
   },
   {
-    key: 'burn', title: 'Burn for return', phase: ['minted'], what: 'The preflight runs again on fresh chain state, then the burn is certified: it signs the recipient, the amount and the index a, and its redemption ID eta is fixed from here on. The burn is irreversible.',
+    key: 'burn', title: 'Burn for return', phase: ['minted'], when: (t) => !t.pending, what: 'The preflight runs again on fresh chain state, then the burn is certified: it signs the recipient, the amount and the index a, and its redemption ID eta is fixed from here on. The burn is irreversible.',
     input: () => recipientInput,
     note: (t) => (t?.burning ? 'A burn of this token is in progress: Run resumes it with the same request.' : t?.returnId ? `Planned return ${t.returnId.slice(0, 14)}… to ${t.recipient}.` : undefined),
     run: async () => {

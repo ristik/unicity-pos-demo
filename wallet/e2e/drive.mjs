@@ -33,6 +33,12 @@ const chromeBin = process.env.CHROME ?? '/Applications/Chromium.app/Contents/Mac
 const profile = process.env.PROFILE_DIR ?? join(tmpdir(), 'unicity-demo-e2e-profile');
 const chrome = spawn(chromeBin, ['--headless=new', '--disable-gpu', ...(process.env.CHROME_ARGS ?? '').split(' ').filter(Boolean), `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`, 'about:blank'], { stdio: 'ignore' });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// the browser dies with this process, whatever stopped it (an unknown token, a failed step)
+process.on('exit', () => chrome.kill());
+process.on('uncaughtException', (e) => {
+  console.error(e instanceof Error ? e.message : e);
+  process.exit(1);
+});
 
 for (let i = 0; ; i++) {
   try {
