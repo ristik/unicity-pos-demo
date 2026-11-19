@@ -11,7 +11,7 @@
 //   fund               "send 0.001 UCT gas" to the other tab   received    print the last received-token status
 //   trust              print the trust-base card             captcha     show the faucet widget
 //   deployment         print the bridge deployment card      flow        print the asset-flow card
-//   size | dark        laptop viewport | dark color scheme   shot:<file> PNG screenshot
+//   size[:<height>] | dark   laptop viewport (default height 1500) | dark color scheme   shot:<file> PNG screenshot
 //   wait:<seconds>     sleep                                 dump        print the page text
 //   reload             reload the page (the journal and token records are in IndexedDB: a step resumes after it)
 //
@@ -169,7 +169,7 @@ for (const c of cmds) {
       console.log(p, 'captcha:', await t.ev(`document.querySelector('.captcha iframe') ? 'widget rendered' : 'no widget'`));
       break;
     case 'size':
-      await t.send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 1500, deviceScaleFactor: 1, mobile: false });
+      await t.send('Emulation.setDeviceMetricsOverride', { width: 1366, height: Number(arg || 1500), deviceScaleFactor: 1, mobile: false });
       break;
     case 'dark':
       await t.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] });
