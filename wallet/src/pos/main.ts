@@ -23,6 +23,8 @@ import {
   asMembers, clockKey, discover, eligibleMember, ineligibility, rawWeight, readClock, readCommittee, readIdentity, readOpenResult, readParams, readRecord, readResult,
   type Clock, type Committee, type Identity, type OpenResult, type Params, type RecordView, type ResultView,
 } from './model.js';
+import { custodyCard, configCard, governanceCard, identitiesCard as vrIdentitiesCard, moduleCard, outputCard, type Deps, type VrLogs } from './vrcards.js';
+import { readVr, readVrPointers, type VrModel } from './vr.js';
 import { check, fraction, predicates, quorumView, SEL_REASON, select, type Member } from './rules.js';
 
 installFetchTrace();
@@ -30,7 +32,7 @@ installFetchTrace();
 // ---- state ------------------------------------------------------------------------------------------------------------------------------------
 const settings = loadSettings();
 const chain = new Chain(abs(settings.rpc), posAddresses(), SPACING_MS);
-const ROLE_NAME: Record<string, string> = { registry: 'SealRegistry', custody: 'StakeCustody', election: 'ElectionPolicy', reader: 'EligibilityReader', evidence: 'Evidence', governance: 'GovernanceParams', rewardPool: 'RewardPool' };
+const ROLE_NAME: Record<string, string> = { vr: 'ValidatorRegistry (VR)', poa: 'PoaElection', multisig: 'FoundationMultisig', registry: 'SealRegistry', custody: 'StakeCustody', election: 'ElectionPolicy', reader: 'EligibilityReader', evidence: 'Evidence', governance: 'GovernanceParams', rewardPool: 'RewardPool' };
 
 let clock: Clock | null = null;
 let params: Params | null = null;
@@ -41,6 +43,11 @@ let lastAttempt: ResultView | null = null;
 const records = new Map<bigint, RecordView>();
 let trust: TrustInput | null = null;
 let trustPinSource = '';
+/** the validator registry (VR) and its module: null until read, or when the network has no VR (the P85-only view then) */
+let vr: VrModel | null = null;
+let vrChecked = false;
+let lastVr = 0;
+const vrLogs: VrLogs = { vr: [], module: [], identities: [], governance: [] };
 let trustTrace: Trace | undefined;
 let freshEpoch: bigint | null = null;
 const logs: Record<'clock' | 'committee' | 'election' | 'identities' | 'params' | 'discover', CallRecord[]> = { clock: [], committee: [], election: [], identities: [], params: [], discover: [] };
@@ -112,6 +119,8 @@ function card(title: string, sub: string, cls: string, ...body: (Node | string)[
   const err = errors.get(title);
   return h('section', { class: `card ${cls}` }, h('h2', {}, title, h('span', { class: 'sub' }, sub)), err ? h('p', { class: 'err' }, err) : '', ...body);
 }
+
+const vrDeps: Deps = { card, drawer: (key, derive, log) => drawer(key, derive, log), badge, stat, hm, utc };
 
 // ---- 1. committee now -------------------------------------------------------------------------------------------------------------------------
 function tipEntryForEpoch(epoch: bigint) {
@@ -468,12 +477,13 @@ function theme(next?: string): void {
 theme();
 
 function header(): HTMLElement {
-  const k = clock;
+  const k = clock ?? (vr ? { block: vr.block, progress: vr.progress, ucTime: vr.ucTime, at: vr.at } : null);
   const errs = [...errors.entries()];
   return h('header', {},
     h('h1', {}, 'Unicity PoS visualizer'),
     h('span', { class: 'live muted' }, k ? `block ${k.block} · progress ${k.progress} · UC ${utc(k.ucTime)}` : 'connecting…'),
     k ? h('span', { class: 'muted', 'data-ago': String(k.at) }, '') : '',
+    vr ? badge(vr.mode === 'poa' ? 'module: PoA (the intermediate mode before PoS)' : vr.mode === 'pos' ? 'module: PoS' : 'module: other', vr.mode === 'poa' ? 'warn' : 'good') : '',
     errs.length ? h('span', { class: 'err', title: errs.map(([a, b]) => `${a}: ${b}`).join('\n') }, `⚠ ${errs.length} read error${errs.length > 1 ? 's' : ''} (backing off)`) : '',
     h('nav', {},
       h('span', { class: 'muted' }, `${chain.sent} requests · poll ${POLL_MS / 1000} s`),
@@ -483,19 +493,37 @@ function header(): HTMLElement {
 }
 
 const root = document.getElementById('app')!;
-const slots = { header: h('div'), committee: h('div', { class: 'wide' }), election: h('div'), params: h('div'), identities: h('div', { class: 'wide' }), utb: h('div', { class: 'wide' }) };
-root.replaceChildren(slots.header, h('main', { class: 'pos' }, slots.committee, slots.election, slots.params, slots.identities, slots.utb),
+const slots = { header: h('div'), vrNote: h('div', { class: 'wide' }), vrModule: h('div'), vrOutput: h('div'), vrGov: h('div'), vrIdent: h('div', { class: 'wide' }), vrConfig: h('div'), vrCustody: h('div'), committee: h('div', { class: 'wide' }), election: h('div'), params: h('div'), identities: h('div', { class: 'wide' }), utb: h('div', { class: 'wide' }) };
+root.replaceChildren(slots.header, h('main', { class: 'pos' }, slots.vrNote, slots.vrModule, slots.vrOutput, slots.vrGov, slots.vrConfig, slots.vrIdent, slots.vrCustody, slots.committee, slots.election, slots.params, slots.identities, slots.utb),
   h('p', { class: 'footer' }, 'Read-only: eth_call against latest and GET /api/v1/trustbases, one request at a time. What-if panels are local arithmetic.'));
+
+function renderVr(): void {
+  const none = h('div');
+  if (!vr) {
+    slots.vrNote.replaceChildren(vrChecked ? card('Validator registry', 'not found', 'vr-note', h('p', { class: 'what' }, `There is no validator registry at ${chain.addresses.vr}: this network predates it (or the RPC is another chain). The page shows the P85 view below.`)) : card('Validator registry', 'loading…', 'vr-note'));
+    for (const k of ['vrModule', 'vrOutput', 'vrGov', 'vrConfig', 'vrIdent', 'vrCustody'] as const) slots[k].replaceChildren();
+    return;
+  }
+  slots.vrNote.replaceChildren(none);
+  slots.vrModule.replaceChildren(moduleCard(vr, vrLogs, vrDeps));
+  slots.vrOutput.replaceChildren(outputCard(vr, vrLogs, vrDeps));
+  slots.vrGov.replaceChildren(governanceCard(vr, vrLogs, vrDeps));
+  slots.vrConfig.replaceChildren(configCard(vr, vrLogs, vrDeps));
+  slots.vrIdent.replaceChildren(vrIdentitiesCard(vr, vrLogs, vrDeps));
+  slots.vrCustody.replaceChildren(...[custodyCard(vr, vrLogs, vrDeps)].filter((x): x is HTMLElement => x !== null));
+}
 
 function render(): void {
   // keep the focused control across a re-render (polls re-render while someone types)
   const active = document.activeElement as HTMLElement | null;
   const k = active?.dataset?.k;
   slots.header.replaceChildren(header());
-  slots.committee.replaceChildren(committeeCard());
-  slots.election.replaceChildren(electionCard());
-  slots.params.replaceChildren(paramsCard());
-  slots.identities.replaceChildren(identitiesCard());
+  renderVr();
+  const legacy = !vr || vr.mode === 'pos';
+  slots.committee.replaceChildren(...(legacy ? [committeeCard()] : []));
+  slots.election.replaceChildren(...(legacy ? [electionCard()] : []));
+  slots.params.replaceChildren(...(legacy ? [paramsCard()] : []));
+  slots.identities.replaceChildren(...(legacy ? [identitiesCard()] : []));
   slots.utb.replaceChildren(utbCard());
   if (k) (root.querySelector(`[data-k="${k}"]`) as HTMLElement | null)?.focus();
   tick();
@@ -599,6 +627,34 @@ async function readTrustTier(): Promise<void> {
   }
 }
 
+/** VR: the cheap pointer read every poll, the full read when a pointer moved or every SLOW_MS (and again every SLOW_MS while there is no VR). */
+async function readVrTier(now: number): Promise<void> {
+  if (vr && now - lastVr < SLOW_MS) {
+    const p = await readVrPointers(chain, vrLogs.vr);
+    if (p.key === vr.key) {
+      vr.block = p.block;
+      vr.progress = p.progress;
+      vr.ucTime = p.ucTime;
+      vr.at = Date.now();
+      return;
+    }
+  } else if (!vr && vrChecked && now - lastVr < SLOW_MS) return;
+  const before = chain.addresses.election;
+  const logs: VrLogs = { vr: [], module: [], identities: [], governance: [] };
+  const m = await readVr(chain, logs);
+  vrChecked = true;
+  lastVr = Date.now();
+  vr = m;
+  if (m) Object.assign(vrLogs, logs);
+  // PoS: custody and the election came from VR's liability holder; the P85 view starts over when they changed
+  if (m?.mode === 'pos' && chain.addresses.election !== before) {
+    chain.addresses.reader = '';
+    params = null;
+    lastParams = 0;
+    lastKey = '';
+  }
+}
+
 async function loop(): Promise<void> {
   let backoff = 0;
   for (;;) {
@@ -607,8 +663,10 @@ async function loop(): Promise<void> {
       continue;
     }
     const now = Date.now();
-    if (!params || now - lastParams > PARAMS_MS) if (await tier('Meta-parameters', readParamsTier)) lastParams = now;
-    const okClock = await tier('Election', readClockTier);
+    await tier('Validator registry', () => readVrTier(now));
+    const legacy = !vr || vr.mode === 'pos';
+    if (legacy && (!params || now - lastParams > PARAMS_MS)) if (await tier('Meta-parameters', readParamsTier)) lastParams = now;
+    const okClock = legacy && (await tier('Election', readClockTier));
     if (okClock && clock) {
       const key = clockKey(clock);
       if (key !== lastKey || now - lastSlow > SLOW_MS) {

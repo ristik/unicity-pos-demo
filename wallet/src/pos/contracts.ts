@@ -15,9 +15,13 @@ export interface Fn {
   src?: string;
 }
 
-export type Role = 'registry' | 'custody' | 'election' | 'reader' | 'evidence' | 'governance' | 'rewardPool';
+export type Role = 'registry' | 'custody' | 'election' | 'reader' | 'evidence' | 'governance' | 'rewardPool' | 'vr' | 'poa' | 'multisig';
 
 const POLICY = 'uint16 penaltyBps,uint16 lifetimeCapBps,uint16 bountyBps,uint128 bountyCap,uint64 evidenceWindow,uint64 suffixEvidenceWindow,uint64 holdNormal,uint64 holdSuffix,uint64 holdRetirement,uint64 timeFloor';
+
+const MEMBER = 'uint64 id,uint64 generation,uint64 weight,uint64 rawWeight,bytes32 rootNodeWord,bytes32 rootKeyHash,bytes32 evmNodeWord,bytes32 evmKeyHash,address payee,bytes32 exposureDigest';
+const BINDING = 'bytes32 rootNodeWord,bytes32 rootKeyHash,bytes32 evmNodeWord,bytes32 evmKeyHash,address payee,string rootNodeID,bytes rootKey,string evmNodeID,bytes evmKey';
+const FEES = 'uint64 baseFeeFloor,uint64 changeDenominator,address feeCollector';
 
 const f = (contract: Role, sig: string, out: string, extra: Partial<Fn> = {}): Fn => ({ contract, sig, out, ...extra });
 
@@ -84,6 +88,40 @@ export const FN = {
   rpAvailable: f('rewardPool', 'available()', 'uint256'),
   rpTotalCredits: f('rewardPool', 'totalCredits()', 'uint256'),
   rpNextStart: f('rewardPool', 'nextStart()', 'uint64'),
+
+  // ValidatorRegistry (VR, 0xff..03; contracts src/vr/VRTypes.sol, ValidatorRegistry.sol, VRGovernanceFacet.sol)
+  vrCommittee: f('vr', 'committee()', `(${MEMBER})[]`, { src: 'ValidatorRegistry.sol:527' }),
+  vrOpenOutput: f('vr', 'openOutput()', 'bytes32', { src: 'VRGovernanceFacet.sol:316' }),
+  vrLastAcked: f('vr', 'lastAcked()', 'bytes32', { src: 'VRGovernanceFacet.sol:320' }),
+  vrHealth: f('vr', 'health()', 'uint8', { src: 'VRGovernanceFacet.sol:328' }),
+  vrRecordCursor: f('vr', 'recordCursor()', 'uint64', { src: 'ValidatorRegistry.sol:306' }),
+  vrActiveModule: f('vr', 'activeModule()', '(address module,bytes32 codeHash,(bytes32 moduleTag,uint32 capabilities,uint64 maxElectionInterval,uint64[8] gasBounds,address liabilityHolder,bytes32 liabilityHolderCodeHash) meta,uint8 health,bool workPending,uint64 workSince,uint64 stallDeadline)', { src: 'VRGovernanceFacet.sol:332' }),
+  vrConfig: f('vr', 'config()', `(bytes32 network,address governor,uint32 nMin,uint32 nTarget,uint32 nMax,uint32 vMax,uint32 lMax,uint32 rMax,uint32 maxBatch,(${FEES}) feesPrevious,(${FEES}) feesCurrent,uint64 feesEffectiveBlock,uint64 delayRounds,uint64 delaySeconds,uint64 knownRootEpoch,uint64 epochStartProgress,uint64 maxGas,uint64 systemGas,uint64 continuityMaxM,uint64 continuityDistNum,uint64 continuityDistDen)`, { src: 'VRGovernanceFacet.sol:351' }),
+  vrIdentity: f('vr', 'identity(uint64)', `(address owner,uint64 generation,bytes32 currentRef,bytes32 stagedRef,uint64 bindingNonce,uint64 registrationNonce,(${BINDING}) current,(${BINDING}) staged,bytes endpoints)`, { src: 'VRGovernanceFacet.sol:260' }),
+  vrPendingChanges: f('vr', 'pendingChanges()', 'uint64[]', { src: 'VRGovernanceFacet.sol:312' }),
+  vrChange: f('vr', 'change(uint64)', '(uint8 kind,uint8 state,uint8 rejectReason,uint64 notBeforeProgress,uint64 notBeforeTime,uint64 activeRootEpoch,uint64 scheduledAt,bytes32 payloadHash,bytes32 boundTo,bytes payload)', { src: 'VRGovernanceFacet.sol:296' }),
+  vrOutput: f('vr', 'output(bytes32)', `(uint8 state,uint64 attempt,uint64 reservedProgress,uint64 expiresAtProgress,bytes32 predecessor,address sourceModule,bool native,bytes32 moduleTag,bytes32 membersDigest,bytes32 kDigest,bytes32 changesDigest,bytes32 snapshotDigest,bytes32 policyDigest,bytes32 outputCommit,uint8 invalidReason,uint64 invalidAtProgress,(${MEMBER})[] members,uint64[] changes)`, { src: 'ValidatorRegistry.sol:500' }),
+  vrHolderCount: f('vr', 'holderCount()', 'uint8', { src: 'VRGovernanceFacet.sol:401' }),
+  vrHolderAt: f('vr', 'holderAt(uint8)', '(address holder,bytes32 holderCodeHash,address module,uint64 registeredEpoch)', { src: 'VRGovernanceFacet.sol:405' }),
+  vrActivationCount: f('vr', 'activationCount()', 'uint32', { src: 'VRGovernanceFacet.sol:389' }),
+  vrActivationAt: f('vr', 'activationAt(uint32)', '(bytes32 ruleId,bytes32 releaseDigest,uint64 rootEpoch,uint64 notBeforeUcTime,uint8 state,uint64 changeId)', { src: 'VRGovernanceFacet.sol:393' }),
+
+  // PoaElection (the active module under PoA; src/vr/poa/PoaElection.sol)
+  poaStatus: f('poa', 'status(uint64)', 'uint8 state,uint64 sinceProgress', { src: 'PoaElection.sol:216' }),
+  poaMembers: f('poa', 'members()', 'uint64[]', { src: 'PoaElection.sol:222' }),
+  poaQueue: f('poa', 'queue()', 'uint64[]', { src: 'PoaElection.sol:226' }),
+  poaParkPeriod: f('poa', 'PARK_PERIOD()', 'uint64', { immutable: true, src: 'PoaElection.sol:63' }),
+
+  // FoundationMultisig (VR's governor under PoA; src/vr/FoundationMultisig.sol)
+  msSigners: f('multisig', 'signers()', 'address[5]', { src: 'FoundationMultisig.sol:54' }),
+  msNextSigners: f('multisig', 'nextSigners()', 'address[5]', { src: 'FoundationMultisig.sol:58' }),
+  msNonce: f('multisig', 'nonce()', 'uint64', { src: 'FoundationMultisig.sol:41' }),
+  msSignersPending: f('multisig', 'signersPending()', 'bool', { src: 'FoundationMultisig.sol:43' }),
+  msNotBeforeProgress: f('multisig', 'nextNotBeforeProgress()', 'uint64', { src: 'FoundationMultisig.sol:44' }),
+  msNotBeforeTime: f('multisig', 'nextNotBeforeTime()', 'uint64', { src: 'FoundationMultisig.sol:45' }),
+
+  // custody, reached through VR (the liability holder of the PoS generation)
+  custodyElection: f('custody', 'election()', 'address', { src: 'CustodyStorage.sol:219' }),
 } satisfies Record<string, Fn>;
 
 export type FnName = keyof typeof FN;
@@ -100,3 +138,26 @@ export const ASSIGNMENT_STATE = ['none', 'Reserved', 'Active', 'Aborted'];
  * rootchain storage.ResultReservationLifetimeProgress; deploy/testnet/pos_reject.py LIFETIME). A root-side constant, not readable on chain.
  */
 export const REJECT_AFTER_ROUNDS = 16384n;
+
+// ---- the validator registry's codes (contracts src/vr/VRConstants.sol, schema v1 section 3) ---------------------------------------------------------
+export const VR_OUTPUT_STATE = ['None', 'Reserved', 'Published', 'Invalidated', 'Rejected', 'Acknowledged', 'Recovered', 'Closed'];
+export const VR_HEALTH = ['Healthy', 'Faulted', 'Stalled', 'Inconsistent'];
+export const CHANGE_KIND = ['', 'SetModule', 'ModuleAction', 'SetGovernor', 'CommitteeLimits', 'FeeParams', 'ReplaceAggregatorValidators', 'AddPartition', 'UpdatePartition', 'ScheduleActivation', 'ForceRemove'];
+export const CHANGE_STATE = ['None', 'Queued', 'Scheduled', 'Bound', 'Active', 'Rejected', 'Cancelled'];
+export const ACTIVATION_STATE = ['', 'Active', 'Superseded', 'Latched'];
+/** The payload field lists of each change kind (bft-core vrschema/changes.go ChangePayloadTypes/Fields). */
+export const CHANGE_PAYLOAD: Record<number, string> = {
+  1: 'address module,bytes32 codeHash,bytes initData', 2: 'address module,bytes action', 3: 'address governor,bytes32 codeHash',
+  4: 'uint32 nMin,uint32 nTarget,uint32 nMax', 5: 'uint64 baseFeeFloor,uint64 changeDenominator,address feeCollector',
+  6: 'uint32 partition,bytes shard,bytes32 expectedOldPdrHash,bytes successorPdr,bytes pops', 7: 'bytes pdr,bytes pops',
+  8: 'uint32 partition,bytes shard,bytes32 expectedOldPdrHash,bytes successorPdr', 9: 'bytes32 ruleId,bytes32 releaseDigest,uint64 rootEpoch,uint64 notBeforeUcTime,string label',
+  10: 'uint64 id',
+};
+/** PoaElection states (design 3.7.1) and ModuleAction actions. */
+export const POA_STATE = ['None', 'Applied', 'Admitted', 'Joining', 'Active', 'ExitRequested', 'Removing', 'Leaving', 'Exited', 'Parked'];
+export const POA_ACTION = ['', 'Admit', 'Remove', 'ConfirmExit'];
+/** PoaElection.TAG = keccak256("unicity.vr.poa.v1"): what the active module's moduleTag is under PoA. */
+export const POA_TAG = '0xbcaea3db6891e775ad29d518c8f60e5bd039e96222333877246cf89d5c77e3bd';
+/** VR's MIN_EPOCH_GAP: the progress that must pass since an epoch's first ordinary round before the next election is due (VRConstants.sol). */
+export const MIN_EPOCH_GAP = 100n;
+export const VR_ADDRESS = '0xff00000000000000000000000000000000000003';

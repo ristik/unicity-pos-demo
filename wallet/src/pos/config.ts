@@ -28,6 +28,10 @@ export function posAddresses(): Addresses {
     custody: pick('custody', 'VITE_POS_CUSTODY', '0xc399A50Da6437b10e26AEf8DB67EB7f79f8f1D93'),
     election: pick('election', 'VITE_POS_ELECTION', '0x051A08C2e5262403690784A4FF712809d55A53c3'),
     rewardPool: pick('rewardPool', 'VITE_POS_REWARD_POOL', '0x0b53591d38dcc0367938D4B2738a9BFC27eE7b48'),
+    // the validator registry, a fixed system address; the module and the governor are read from it
+    vr: pick('vr', 'VITE_POS_VR', '0xff00000000000000000000000000000000000003'),
+    poa: '',
+    multisig: '',
     // discovered from the election
     reader: '',
     evidence: '',
