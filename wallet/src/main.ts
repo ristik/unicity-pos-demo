@@ -611,7 +611,7 @@ function identityCard(): HTMLElement {
       }, 'replace this tab\'s key')),
       h('button', { class: 'link', disabled: !session || !!busy, onclick: () => void step('balance', async () => { await refreshBalances(); return 'refreshed'; }) }, 'refresh balance'),
       fundPeer(),
-      ...['fund', 'balance'].map((k) => status.get(k)).map((st) => (st ? h('span', { class: st.ok ? 'msg' : 'msg bad' }, st.text) : ''))),
+      ...['fund', 'fund-discard', 'balance', 'import', 'reset'].map((k) => status.get(k)).map((st) => (st ? h('span', { class: st.ok ? 'msg' : 'msg bad' }, st.text) : ''))),
     traces.has('fund') ? drawer('fund') : '',
     backup);
 }

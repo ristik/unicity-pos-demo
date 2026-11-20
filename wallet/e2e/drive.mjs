@@ -13,6 +13,7 @@
 //   deployment         print the bridge deployment card      flow        print the asset-flow card
 //   size[:<height>] | dark   laptop viewport (default height 1500) | dark color scheme   shot:<file> PNG screenshot
 //   wait:<seconds>     sleep                                 dump        print the page text
+//   import:<0xkey>[=<mark>]  fill the import form and press replace; trustrefresh  press refresh from aggregator
 //   handoff            switch this tab's handoff on (a tab announces itself only when asked)
 //   reload             reload the page (the journal and token records are in IndexedDB: a step resumes after it)
 //
@@ -135,6 +136,22 @@ for (const c of cmds) {
       await t.ev(`(() => { const el = document.querySelector('[data-step=${k}] input'); el.value = ${JSON.stringify(v)}; el.dispatchEvent(new Event('input', { bubbles: true })); })()`);
       break;
     }
+    case 'import': {
+      // import:<0x key>[=<intent mark>]: fill the import form and press replace; prints the outcome shown by the page
+      const [k, mark] = arg.split('=');
+      await t.ev(`(() => { const d = [...document.querySelectorAll('details.inline')].find((x) => x.querySelector('textarea')); d.open = true; d.querySelector('textarea').value = ${JSON.stringify(k)}; d.querySelector('input').value = ${JSON.stringify(mark ?? '')}; })()`);
+      await clickText(t, "replace this tab's key");
+      await sleep(1500);
+      await idle(t);
+      console.log(p, 'import:', await t.ev(`(document.querySelector('section.card .row .msg.bad') ?? document.querySelector('section.card .row .msg'))?.innerText`) ?? 'reloaded');
+      break;
+    }
+    case 'trustrefresh':
+      await clickText(t, 'refresh from aggregator');
+      await sleep(500);
+      await idle(t);
+      console.log(p, 'trust refresh:', await t.ev(text(card('Trust'))));
+      break;
     case 'handoff':
       await clickText(t, 'take part in handoff');
       await sleep(1000);
