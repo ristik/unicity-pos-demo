@@ -2,17 +2,15 @@
  * Two tabs of one browser hand a token over a BroadcastChannel (no server, no relay). The receiver announces its public key; the sender
  * transfers the token to that key on the aggregator and posts the token file; the receiver verifies it offline and checks it is the owner.
  */
-import type { NativeBridge, VerifiedToken } from '@unicitylabs/native-bridge-plugin';
-import { Token } from '@unicitylabs/state-transition-sdk/lib/transaction/Token.js';
+import type { NativeBridgeV2 } from '@unicitylabs/native-bridge-plugin/nb2';
 
 import { isAddress } from './evm.js';
 import { eqBytes, hex, unhex } from './hex.js';
-import { predicateOf } from './keys.js';
 
 export type Message =
-  | { type: 'hello'; from: string; publicKey: string; evmAddress: string }
+  | { type: 'hello'; from: string; domain: string; publicKey: string; evmAddress: string }
   | { type: 'who'; from: string }
-  | { type: 'token'; from: string; to: string; bytes: string; amountWei: string };
+  | { type: 'token'; from: string; to: string; domain: string; bytes: string; amountWei: string };
 
 /** Largest token file accepted over the channel (hex characters): a token is a few KB; this only bounds what a stray tab can make us store. */
 export const MAX_TOKEN_HEX = 2_000_000;
@@ -30,10 +28,10 @@ export function parseMessage(d: unknown): Message | null {
     case 'who':
       return { type: 'who', from: m.from };
     case 'hello':
-      return isHex(m.publicKey, 66) && isAddress(m.evmAddress) ? { type: 'hello', from: m.from, publicKey: m.publicKey, evmAddress: m.evmAddress } : null;
+      return isHex(m.domain, 64) && isHex(m.publicKey, 66) && isAddress(m.evmAddress) ? { type: 'hello', from: m.from, domain: m.domain.toLowerCase(), publicKey: m.publicKey, evmAddress: m.evmAddress } : null;
     case 'token':
-      return isProfile(m.to) && isHex(m.bytes) && typeof m.amountWei === 'string' && /^\d{1,40}$/.test(m.amountWei)
-        ? { type: 'token', from: m.from, to: m.to, bytes: m.bytes, amountWei: m.amountWei } : null;
+      return isProfile(m.to) && isHex(m.domain, 64) && isHex(m.bytes) && typeof m.amountWei === 'string' && /^\d{1,40}$/.test(m.amountWei)
+        ? { type: 'token', from: m.from, to: m.to, domain: m.domain.toLowerCase(), bytes: m.bytes, amountWei: m.amountWei } : null;
     default:
       return null;
   }
@@ -41,11 +39,16 @@ export function parseMessage(d: unknown): Message | null {
 
 export interface Peer { profile: string; publicKey: string; evmAddress: string }
 
+/**
+ * A tab advertises itself only when it is the profile's writer, holds a durable key and has its inbox ready (the wallet constructs a Handoff
+ * only then), and only to peers of the same deployment: `domain` (the deployment domain D, hex) is in every announcement and token message,
+ * and a peer or token of another domain is ignored.
+ */
 export class Handoff {
   private readonly ch: BroadcastChannel | null;
   readonly peers = new Map<string, Peer>();
 
-  constructor(readonly profile: string, private readonly me: { publicKey: Uint8Array; evmAddress: string }, private readonly on: {
+  constructor(readonly profile: string, readonly domain: string, private readonly me: { publicKey: Uint8Array; evmAddress: string }, private readonly on: {
     peer?: (p: Peer) => void;
     token?: (m: Extract<Message, { type: 'token' }>) => void;
   }) {
@@ -64,12 +67,16 @@ export class Handoff {
   private post(m: Message): void {
     this.ch?.postMessage(m);
   }
+  close(): void {
+    this.ch?.close();
+  }
   hello(): void {
-    this.post({ type: 'hello', from: this.profile, publicKey: hex(this.me.publicKey), evmAddress: this.me.evmAddress });
+    this.post({ type: 'hello', from: this.profile, domain: this.domain, publicKey: hex(this.me.publicKey), evmAddress: this.me.evmAddress });
   }
 
   private receive(m: Message): void {
     if (m.from === this.profile) return;
+    if (m.type !== 'who' && m.domain !== this.domain) return; // another deployment: never a recipient, never an inbox
     if (m.type === 'who') this.hello();
     else if (m.type === 'hello') {
       const p = { profile: m.from, publicKey: m.publicKey, evmAddress: m.evmAddress };
@@ -79,16 +86,26 @@ export class Handoff {
   }
 
   sendToken(to: string, bytes: Uint8Array, amountWei: bigint): void {
-    this.post({ type: 'token', from: this.profile, to, bytes: hex(bytes), amountWei: amountWei.toString() });
+    this.post({ type: 'token', from: this.profile, to, domain: this.domain, bytes: hex(bytes), amountWei: amountWei.toString() });
   }
 }
 
-/** The receiver's check: the plug-in verifies the whole token offline ('receipt': held, not burned), and its current owner is this key. */
-export async function acceptToken(bridge: NativeBridge, bytesHex: string, myPublicKey: Uint8Array): Promise<{ bytes: Uint8Array; verified: VerifiedToken }> {
+/**
+ * The receiver's check: the plug-in verifies the whole token offline (its receipt-backed origin, its lineage and every certificate under the held
+ * trust history; nothing is sent), and its current owner is this key.
+ */
+export async function acceptToken(bridge: NativeBridgeV2, bytesHex: string, myPublicKey: Uint8Array): Promise<{ bytes: Uint8Array; verified: { tokenId: Uint8Array; amount: bigint; owner: Uint8Array | null } }> {
   const bytes = unhex(bytesHex);
-  const verified = await bridge.verifyNativeTokenBytes(bytes, 'receipt');
-  const token = await Token.fromCBOR(bytes);
-  const owner = (token.transactions.at(-1) ?? token.genesis).recipient.toCBOR();
-  if (!eqBytes(owner, predicateOf(myPublicKey))) throw new Error('the token verifies, but its owner is another key: not addressed to this wallet');
+  const verified = await bridge.verifyToken(bytes);
+  if (verified.owner === null || !eqBytes(verified.owner, myPublicKey)) throw new Error('the token verifies, but its owner is another key: not addressed to this wallet');
   return { bytes, verified };
+}
+
+/** The durable "has announced" marker, in the profile. Once present, key import is refused across reloads: a sender may hold the key. */
+export const ANNOUNCED_KEY = 'handoff/announced';
+
+/** Commit the marker (durably) BEFORE the first broadcast, then create the Handoff, which announces. */
+export async function announceHandoff<T>(kv: { put(k: string, v: string): Promise<void> }, create: () => T): Promise<T> {
+  await kv.put(ANNOUNCED_KEY, new Date().toISOString());
+  return create();
 }

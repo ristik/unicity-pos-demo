@@ -12,6 +12,7 @@ import { SignaturePredicate } from '@unicitylabs/state-transition-sdk/lib/predic
 import { EncodedPredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/EncodedPredicate.js';
 
 import { hex, unhex } from './hex.js';
+import type { IdbKv } from './idb.js';
 import { load, save } from './store.js';
 
 export interface Burner {
@@ -63,6 +64,55 @@ export function loadOrCreate(): { burner: Burner; created: boolean; persisted: b
 
 export function replaceKey(secret: Uint8Array): Burner {
   const b = burnerFrom(secret);
+  save('key', hex(secret));
+  return b;
+}
+
+const KEY_IN_STORE = 'secret/key';
+
+/** The stored key, if any, without creating one (a page that is not the profile's writer must never make a key). */
+export function loadExisting(): Burner | null {
+  const stored = load('key');
+  if (!stored) return null;
+  try {
+    return burnerFrom(unhex(stored));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The profile's key for its one writer: localStorage's copy, else the durable store's (a localStorage that lost it is restored from it), else a
+ * new key, committed to the durable store (strict durability, awaited) BEFORE it is used: nothing is deposited under a key that a crash could
+ * lose. A key that cannot be made durable is an error, not a warning.
+ */
+export async function loadOrCreateDurable(kv: IdbKv): Promise<{ burner: Burner; created: boolean }> {
+  const lsKey = loadExisting();
+  const stored = await kv.get(KEY_IN_STORE);
+  if (stored) {
+    const burner = burnerFrom(unhex(stored));
+    if (!lsKey || hex(lsKey.secret) !== stored) save('key', stored);
+    return { burner, created: false };
+  }
+  if (lsKey) {
+    await kv.put(KEY_IN_STORE, hex(lsKey.secret)); // a key from before the durable copy existed
+    return { burner: lsKey, created: false };
+  }
+  const secret = secp256k1.utils.randomSecretKey();
+  await kv.put(KEY_IN_STORE, hex(secret));
+  if ((await kv.get(KEY_IN_STORE)) !== hex(secret)) throw new Error('the new key did not read back from the durable store: not used');
+  save('key', hex(secret));
+  return { burner: burnerFrom(secret), created: true };
+}
+
+/**
+ * Replace the key. The profile's journal and records (they belong to the old secret) are deleted, the new key written and, when the user gave
+ * the exported intent mark, a recovery request bound to the deployment (its domain D), all in ONE transaction: a crash leaves the old state or
+ * the whole new one, never a new key without its recovery request or the old key with an empty journal.
+ */
+export async function replaceKeyDurable(kv: IdbKv, secret: Uint8Array, recover?: { next: string; domain: string }): Promise<Burner> {
+  const b = burnerFrom(secret);
+  await kv.rewrite([''], [[KEY_IN_STORE, hex(secret)], ...(recover ? [['recover/next', JSON.stringify(recover)] as [string, string]] : [])]);
   save('key', hex(secret));
   return b;
 }

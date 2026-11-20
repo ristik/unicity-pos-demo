@@ -6,28 +6,29 @@ import { confirmed, valueAtRisk } from '../src/importguard.js';
 import type { TokenRecord } from '../src/tokens.js';
 
 const ADDR = `0x${'ab'.repeat(20)}`;
-const tok = (phase: TokenRecord['phase'], extra: Partial<TokenRecord> = {}): TokenRecord => ({ id: `t-${phase}`, nonce: '1', amountWei: '1000000000000000', phase, ...extra });
+const tok = (phase: TokenRecord['phase'], extra: Partial<TokenRecord> = {}): TokenRecord => ({ id: `t-${phase}`, amountWei: '1000000000000000', phase, ...extra });
 
 test('nothing held: no confirmation needed', () => {
-  assert.deepEqual(valueAtRisk({ address: ADDR, balance: 0n, credit: 0n, tokens: [tok('sent'), tok('redeemed'), tok('burned', { recipient: `0x${'cd'.repeat(20)}` })] }), []);
+  assert.deepEqual(valueAtRisk({ address: ADDR, balance: 0n, tokens: [tok('sent'), tok('split'), tok('redeemed'), tok('burned', { recipient: `0x${'cd'.repeat(20)}` })] }), []);
 });
 
-test('balance, credit, held, received and burned-to-this-address tokens are each named', () => {
+test('balance, deposits not minted, held, received and burned-to-this-address tokens are each named', () => {
   const r = valueAtRisk({
-    address: ADDR, balance: 5n, credit: 7n,
-    tokens: [tok('minted'), tok('received'), tok('burned', { recipient: ADDR.toUpperCase().replace('0X', '0x') }), tok('enveloped', { recipient: ADDR })],
+    address: ADDR, balance: 5n,
+    tokens: [tok('deposited'), tok('minted'), tok('received'), tok('burned', { recipient: ADDR.toUpperCase().replace('0X', '0x') }), tok('minted', { pending: { tx: '', cd: '', at: 0, toPublicKey: '', toProfile: 'b', signer: '' } })],
   });
-  assert.equal(r.length, 6);
+  assert.equal(r.length, 7);
   assert.match(r[0], /EVM balance/);
-  assert.match(r[1], /vault credit/);
+  assert.match(r[1], /not minted yet/);
   assert.match(r[2], /held by this key/);
   assert.match(r[3], /received token/);
-  assert.match(r[4], /will credit this key's address/);
+  assert.match(r[4], /not redeemed yet/);
+  assert.match(r[6], /transfer of token/);
 });
 
-test('an unreadable balance or credit counts as value held', () => {
-  const r = valueAtRisk({ address: ADDR, balance: null, credit: null, tokens: [] });
-  assert.equal(r.length, 2);
+test('an unreadable balance counts as value held', () => {
+  const r = valueAtRisk({ address: ADDR, balance: null, tokens: [] });
+  assert.equal(r.length, 1);
   assert.match(r[0], /could not be read/);
 });
 

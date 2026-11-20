@@ -1,6 +1,6 @@
 /**
- * What replacing this tab's key would put out of reach: the old key is the only stored copy of its secret. `null` for a balance or credit
- * means it could not be read, and is taken as value held.
+ * What replacing this tab's key would put out of reach: the old key is the only stored copy of its secret, and a deposit's secret, the bridge key
+ * and every token's owner key derive from it. `null` for a balance means it could not be read, and is taken as value held.
  */
 import { fmtUnits } from './hex.js';
 import type { TokenRecord } from './tokens.js';
@@ -10,8 +10,6 @@ export interface KeyHoldings {
   address: string;
   /** EVM balance in wei, or null when it could not be read */
   balance: bigint | null;
-  /** unclaimed vault credit of the address, or null when it could not be read */
-  credit: bigint | null;
   tokens: TokenRecord[];
 }
 
@@ -20,15 +18,27 @@ export function valueAtRisk(k: KeyHoldings): string[] {
   const out: string[] = [];
   if (k.balance === null) out.push('the EVM balance could not be read (assume it holds UCT)');
   else if (k.balance > 0n) out.push(`EVM balance ${fmtUnits(k.balance)} UCT`);
-  if (k.credit === null) out.push('the vault credit could not be read (assume there is some)');
-  else if (k.credit > 0n) out.push(`unclaimed vault credit ${fmtUnits(k.credit)} UCT (only this address can claim it)`);
   for (const t of k.tokens) {
     const amount = `${fmtUnits(BigInt(t.amountWei))} UCT`;
-    if (t.phase === 'minted') out.push(`token ${t.id} (${amount}) is held by this key`);
-    else if (t.phase === 'received') out.push(`received token ${t.id} (${amount}, not verified yet) is addressed to this key`);
-    else if ((t.phase === 'burned' || t.phase === 'enveloped') && t.recipient?.toLowerCase() === k.address.toLowerCase()) {
-      out.push(`burned token ${t.id} (${amount}) will credit this key's address ${t.recipient}: only this key can claim it`);
+    switch (t.phase) {
+      case 'planned':
+      case 'deposited':
+      case 'proven':
+        out.push(`deposit ${t.id} (${amount}) is not minted yet (${t.phase}): its secret derives from this key, and only this key can mint it`);
+        break;
+      case 'minted':
+      case 'splitting':
+        out.push(`token ${t.id} (${amount}) is held by this key`);
+        break;
+      case 'received':
+        out.push(`received token ${t.id} (${amount}, not verified yet) is addressed to this key`);
+        break;
+      case 'burned':
+        if (t.recipient?.toLowerCase() === k.address.toLowerCase()) out.push(`burned token ${t.id} (${amount}) is not redeemed yet: it pays this key's address ${t.recipient}, and only this wallet's journal can build the redeem`);
+        break;
+      default:
     }
+    if (t.pending) out.push(`a transfer of token ${t.id} (${amount}) is stored and not certified yet`);
   }
   return out;
 }

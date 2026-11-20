@@ -1,11 +1,9 @@
 /**
- * The plug-in's synthetic native world, copied from ristik/native-bridge-plugins packages/native-bridge-plugin/test/world.ts (nbp-docs e1f58ed)
- * with its imports pointed at the packaged plug-in. Test-only (it uses the SDK's Node hasher).
- */
-/**
- * Independent TS constructors: a complete synthetic native world built from the SDK's own public
- * types (SigningService, SparseMerkleTree, transactions, certificates). Mirrors the Rust world so
- * the two stacks can be compared byte for byte.
+ * Copied from ristik/native-bridge-plugins packages/native-bridge-plugin/test/nb2/world.ts (c9aa333), its imports pointed at the bundled lib/.
+ * The offline simulator of NB2-07's tests: a trust-base history, a fake aggregator (one RSMT leaf and one certificate per request) and
+ * a fake EVM gateway that executes deposits and redemptions against the in-process vault model, certifies every block (the UC of block
+ * N in the companion of N+1), and answers the section 12.7 methods with the gateway's limits. The token verifier inside the vault is
+ * the plug-in's own `verifyReturn` (the Solidity verifier is NB2-05's; the live run against it is NB2-09's).
  */
 import { sha256 } from '@noble/hashes/sha2.js';
 import { InputRecord } from '@unicitylabs/state-transition-sdk/lib/api/bft/InputRecord.js';
@@ -18,543 +16,433 @@ import { RootTrustBaseV2 } from '@unicitylabs/state-transition-sdk/lib/api/bft/t
 import { TrustBaseBundle } from '@unicitylabs/state-transition-sdk/lib/api/bft/trustbase/TrustBaseBundle.js';
 import { CertificationData } from '@unicitylabs/state-transition-sdk/lib/api/CertificationData.js';
 import { InclusionCertificate } from '@unicitylabs/state-transition-sdk/lib/api/InclusionCertificate.js';
-import { InclusionProof } from '@unicitylabs/state-transition-sdk/lib/api/InclusionProof.js';
-import { StateId } from '@unicitylabs/state-transition-sdk/lib/api/StateId.js';
 import { NetworkId } from '@unicitylabs/state-transition-sdk/lib/api/NetworkId.js';
-import { DataHasher } from '@unicitylabs/state-transition-sdk/lib/crypto/hash/DataHasher.js';
+import { StateId } from '@unicitylabs/state-transition-sdk/lib/api/StateId.js';
 import { DataHasherFactory } from '@unicitylabs/state-transition-sdk/lib/crypto/hash/DataHasherFactory.js';
 import { HashAlgorithm } from '@unicitylabs/state-transition-sdk/lib/crypto/hash/HashAlgorithm.js';
 import { NodeDataHasher } from '@unicitylabs/state-transition-sdk/lib/crypto/hash/NodeDataHasher.js';
 import { SigningService } from '@unicitylabs/state-transition-sdk/lib/crypto/secp256k1/SigningService.js';
-import { BurnPredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/builtin/BurnPredicate.js';
-import { SignaturePredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/builtin/SignaturePredicate.js';
-import { SignaturePredicateUnlockScript } from '@unicitylabs/state-transition-sdk/lib/predicate/builtin/SignaturePredicateUnlockScript.js';
-import { EncodedPredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/EncodedPredicate.js';
-import { CborMap } from '@unicitylabs/state-transition-sdk/lib/serialization/cbor/CborMap.js';
-import { CborMapEntry } from '@unicitylabs/state-transition-sdk/lib/serialization/cbor/CborMapEntry.js';
 import { CborSerializer as C } from '@unicitylabs/state-transition-sdk/lib/serialization/cbor/CborSerializer.js';
 import { SparseMerkleTree } from '@unicitylabs/state-transition-sdk/lib/smt/radix/SparseMerkleTree.js';
-import { MintTransaction } from '@unicitylabs/state-transition-sdk/lib/transaction/MintTransaction.js';
-import { Token } from '@unicitylabs/state-transition-sdk/lib/transaction/Token.js';
-import { TokenSalt } from '@unicitylabs/state-transition-sdk/lib/transaction/TokenSalt.js';
-import { TokenType } from '@unicitylabs/state-transition-sdk/lib/transaction/TokenType.js';
-import { TransferTransaction } from '@unicitylabs/state-transition-sdk/lib/transaction/TransferTransaction.js';
-import { MintSigningService } from '@unicitylabs/state-transition-sdk/lib/crypto/MintSigningService.js';
 
-import {
-  concat, DeploymentRegistry, makeDeployment, EMPTY_TRIE_ROOT, EMPTY_UNCLE_HASH, encodeJustification, encodeLockProof, H, accountTrieKey, arr, bs,
-  deriveAsset, deriveSalt, deriveTokenId, deriveType, keccak256, leafValue, lockDigest, lockDigestSlot, lockRecord, makePolicy, policyHash, returnReason,
-  storageTrieKey, u, valueEnvelope, rlpEncodeBytes as encodeBytes, rlpEncodeList as encodeList, TrustInput, NativeBridge,
-  type Deployment, type LockProof, type Policy,
-} from '@unicitylabs/native-bridge-plugin';
-
-/** RLP of an unsigned integer (not in the package's exports). */
-function encodeU64(n: bigint): Uint8Array {
-  if (n === 0n) return encodeBytes(new Uint8Array());
-  const h = n.toString(16);
-  return encodeBytes(Uint8Array.from((h.length % 2 ? `0${h}` : h).match(/../g)!.map((x) => parseInt(x, 16))));
-}
+import { concat, eq, fromHex, toHex } from '../node_modules/@unicitylabs/native-bridge-plugin/lib/bytes.js';
+import { SELECTOR, revertData } from '../node_modules/@unicitylabs/native-bridge-plugin/lib/nb2/abi.js';
+import { ascii, beInt, cArr, cBytes, cTag, cUint, u256 } from '../node_modules/@unicitylabs/native-bridge-plugin/lib/nb2/cbor.js';
+import { ASSET_UCT, TEST_PARAMS, deriveCoin, deriveType, domainOf, encodeConfig, type Config } from '../node_modules/@unicitylabs/native-bridge-plugin/lib/nb2/config.js';
+import { HE, HU } from '../node_modules/@unicitylabs/native-bridge-plugin/lib/nb2/crypto.js';
+import { TOPIC, depositedData } from '../node_modules/@unicitylabs/native-bridge-plugin/lib/nb2/deposit.js';
+import { Nb2Error } from '../node_modules/@unicitylabs/native-bridge-plugin/lib/nb2/errors.js';
+import { decodeSignedTx } from '../node_modules/@unicitylabs/native-bridge-plugin/lib/nb2/evm.js';
+import { EMPTY_TRIE_ROOT, EMPTY_UNCLE_HASH, encodeHeader, type Header } from '../node_modules/@unicitylabs/native-bridge-plugin/lib/nb2/header.js';
+import { buildTrie } from '../node_modules/@unicitylabs/native-bridge-plugin/lib/nb2/mpt.js';
+import { rlpBytes, rlpIndexKey, rlpList, rlpUintEnc } from '../node_modules/@unicitylabs/native-bridge-plugin/lib/nb2/rlp.js';
+import { segmentSealedData } from '../node_modules/@unicitylabs/native-bridge-plugin/lib/nb2/segment.js';
+import { TrustInput } from '../node_modules/@unicitylabs/native-bridge-plugin/lib/nb2/trust.js';
+import { RpcError, type JsonRpc } from '../node_modules/@unicitylabs/native-bridge-plugin/lib/nb2/rpc.js';
+import { VaultModel, type RecipientBehaviour, type VaultEvent } from '../node_modules/@unicitylabs/native-bridge-plugin/lib/nb2/vaultmodel.js';
+import { verdictAbi, verifyReturn } from '../node_modules/@unicitylabs/native-bridge-plugin/lib/nb2/verify.js';
+import type { Aggregator } from '../node_modules/@unicitylabs/native-bridge-plugin/lib/nb2/tokenops.js';
+import { deriveBridgeKey, type BridgeOptions } from '../node_modules/@unicitylabs/native-bridge-plugin/lib/nb2/bridge.js';
+import { MeasuredGasModel, type GasModel } from '../node_modules/@unicitylabs/native-bridge-plugin/lib/nb2/gas.js';
+import { LocalKeySigner } from '../node_modules/@unicitylabs/native-bridge-plugin/lib/nb2/evm.js';
+import { MemoryJournalStore } from '../node_modules/@unicitylabs/native-bridge-plugin/lib/nb2/journal.js';
 
 export const NETWORK = 3;
-export const CHAIN_ID = 7777n;
+export const CHAIN_ID = 31337n;
 export const EVM_PARTITION = 8;
 export const AGG_PARTITION = 7;
 export const VAULT = new Uint8Array(20).fill(0xaa);
-export const ROOT_GENESIS = new Uint8Array(32).fill(0x11);
-export const EXEC_GENESIS = new Uint8Array(32).fill(0x22);
-export const ZERO20 = new Uint8Array(20);
+export const VERIFIER = new Uint8Array(20).fill(0xbb);
+const sha = (b: Uint8Array): Uint8Array => sha256(b);
+export const key = (seed: string): Uint8Array => sha(ascii(`key ${seed}`));
+const h = (b: Uint8Array): string => `0x${toHex(b)}`;
+const q = (v: bigint | number): string => `0x${BigInt(v).toString(16)}`;
 
-export const sha = (b: Uint8Array): Uint8Array => sha256(b);
-export const signer = (seed: number): SigningService => new SigningService(sha(Uint8Array.of(0x73, seed)));
-export const text = (s: string): Uint8Array => new TextEncoder().encode(s);
+// ---- trust base -------------------------------------------------------------------------------------
 
-// ---- Ethereum MPT builder ----------------------------------------------------------------------
+export interface Root { signers: [string, SigningService][]; bundle: Uint8Array; pin: Uint8Array; trust: TrustInput }
 
-const nibs = (k: Uint8Array): number[] => [...k].flatMap((b) => [b >> 4, b & 15]);
-
-function hexPrefix(n: number[], leaf: boolean): Uint8Array {
-  const flag = (leaf ? 2 : 0) | (n.length & 1);
-  const out: number[] = [];
-  let i = 0;
-  if (n.length % 2 === 1) out.push((flag << 4) | n[i++]);
-  else out.push(flag << 4);
-  for (; i < n.length; i += 2) out.push((n[i] << 4) | n[i + 1]);
-  return Uint8Array.from(out);
+export async function makeRoot(n = 4): Promise<Root> {
+  const signers: [string, SigningService][] = Array.from({ length: n }, (_, i) => [`root-${String(i).padStart(2, '0')}`, new SigningService(key(`root ${i}`))]);
+  const entry = C.encodeTag(39000n, C.encodeArray(
+    C.encodeUnsignedInteger(2n), C.encodeUnsignedInteger(BigInt(NETWORK)), C.encodeUnsignedInteger(1n), C.encodeUnsignedInteger(1n),
+    C.encodeArray(...signers.map(([id, s]) => C.encodeArray(C.encodeTextString(id), C.encodeByteString(s.publicKey), C.encodeUnsignedInteger(1n)))),
+    C.encodeUnsignedInteger(BigInt(Math.floor((2 * n) / 3) + 1)), C.encodeNull(), C.encodeNull(), C.encodeByteString(new Uint8Array(32)), C.encodeNull(),
+  ));
+  const pin = await RootTrustBaseV2.decode(entry).entryId();
+  const bundle = await TrustBaseBundle.encode([RootTrustBaseV2.decode(entry)]);
+  return { signers, bundle, pin, trust: await TrustInput.fromBundle(bundle, pin) };
 }
 
-const childItem = (node: Uint8Array): Uint8Array => (node.length < 32 ? node : encodeBytes(keccak256(node)));
+const TR_HASH = sha(ascii('technical record'));
+let round = 1000n;
+/** The certificate round counter (a snapshot restores it). */
+export const roundNow = (): bigint => round;
+export const roundAtLeast = (r: bigint): void => {
+  if (r > round) round = r;
+};
 
-function build(entries: [number[], Uint8Array][], depth: number, target: number[], proof: Uint8Array[]): Uint8Array {
-  const onPath = entries.some((e) => e[0].length === target.length && e[0].every((x, i) => x === target[i]));
-  let node: Uint8Array;
-  if (entries.length === 1) {
-    node = encodeList([encodeBytes(hexPrefix(entries[0][0].slice(depth), true)), encodeBytes(entries[0][1])]);
-  } else {
-    const first = entries[0][0];
-    let cp = 0;
-    while (entries.every((e) => e[0].length > depth + cp && e[0][depth + cp] === first[depth + cp])) cp++;
-    if (cp > 0) {
-      const child = build(entries, depth + cp, target, proof);
-      node = encodeList([encodeBytes(hexPrefix(first.slice(depth, depth + cp), false)), childItem(child)]);
-    } else {
-      const items: Uint8Array[] = [];
-      for (let n = 0; n < 16; n++) {
-        const group = entries.filter((e) => e[0][depth] === n);
-        items.push(group.length === 0 ? encodeBytes(new Uint8Array()) : childItem(build(group, depth + 1, target, proof)));
-      }
-      items.push(encodeBytes(new Uint8Array()));
-      node = encodeList(items);
+export async function makeUc(root: Root, partition: number, stateHash: Uint8Array, blockHash: Uint8Array, timestamp: bigint): Promise<Uint8Array> {
+  const ir = new InputRecord(++round, 1n, null, stateHash, new Uint8Array(), timestamp, blockHash, 0n, null);
+  const conf = sha(ascii(`shard configuration ${partition}`));
+  const stc = new ShardTreeCertificate(ShardId.decode(Uint8Array.of(0x80)), []);
+  const shardRoot = await UnicityCertificate.calculateShardTreeCertificateRootHash(ir, TR_HASH, conf, stc);
+  const pkey = new Uint8Array(4);
+  new DataView(pkey.buffer).setUint32(0, partition);
+  const treeRoot = sha(concat(C.encodeByteString(Uint8Array.of(1)), C.encodeByteString(pkey), C.encodeByteString(sha(C.encodeByteString(shardRoot.data)))));
+  const seal = await UnicitySeal.create(NetworkId.fromId(NETWORK), round, 1n, timestamp, null, treeRoot, new Map(root.signers));
+  return new UnicityCertificate(ir, TR_HASH, conf, stc, new UnicityTreeCertificate(BigInt(partition), []), seal).toCBOR();
+}
+
+// ---- deployment ---------------------------------------------------------------------------------------
+
+export function makeConfig(root: Root, K = 4n, B = 2n): Config {
+  const executionGenesis = sha(ascii('execution genesis'));
+  return {
+    network: NETWORK, rootGenesis: root.pin, executionGenesis, chainId: CHAIN_ID, evmPartition: EVM_PARTITION, evmShard: Uint8Array.of(0x80),
+    aggregatorPartition: AGG_PARTITION, vault: VAULT, asset: ASSET_UCT, ty: deriveType(NETWORK, root.pin, executionGenesis, CHAIN_ID),
+    aid: deriveCoin(NETWORK, root.pin, executionGenesis, CHAIN_ID), semanticProfileHash: sha(ascii('profile')), verifier: VERIFIER,
+    verifierCodeHash: sha(ascii('verifier code')), K, B, Qmax: (1n << 120n) - 1n,
+  };
+}
+
+// ---- aggregator -----------------------------------------------------------------------------------------
+
+export class FakeAggregator implements Aggregator {
+  public readonly certified = new Map<string, Uint8Array>();
+  public time = 1_700_000_000n;
+  public calls = 0;
+  public constructor(private readonly root: Root) {}
+
+  public async certify(request: Uint8Array): Promise<Uint8Array> {
+    this.calls++;
+    const cd = CertificationData.fromCBOR(request);
+    const sid = (await StateId.fromCertificationData(cd)).data;
+    const prior = this.certified.get(toHex(sid));
+    if (prior !== undefined) {
+      // single spend: the same request gets its proof again, another transaction from the same state is refused
+      if (toHex(prior).includes(toHex(request))) return prior;
+      throw new Error('fake aggregator: state already spent by another transaction');
+    }
+    const t = ++this.time;
+    const smt = new SparseMerkleTree(new DataHasherFactory(HashAlgorithm.SHA256, NodeDataHasher));
+    await smt.addLeaf(sid, HU(cArr(cBytes(cd.transactionHash.data), cUint(t))));
+    const r = await smt.calculateRoot();
+    const uc = await makeUc(this.root, AGG_PARTITION, r.hash.data, sha(concat(ascii('aggregator block'), r.hash.data)), t + 1n);
+    const proof = cTag(39033, cArr(cUint(1), request, cUint(t), cBytes(InclusionCertificate.create(r, sid).encode()), uc));
+    this.certified.set(toHex(sid), proof);
+    return proof;
+  }
+}
+
+// ---- the EVM gateway --------------------------------------------------------------------------------------
+
+interface Log { address: Uint8Array; topics: Uint8Array[]; data: Uint8Array }
+interface Rcpt { status: 0n | 1n; logs: Log[]; tx: Uint8Array; from: Uint8Array; revert: Uint8Array | null; gas: bigint; type: number }
+interface Block { header: Header; hash: Uint8Array; uc: Uint8Array | null; receipts: Rcpt[] }
+
+export interface Faults {
+  /** The next N sends are included but answered with HTTP 503 (partial broadcast, #1121). */
+  ambiguousSends: number;
+  /** SegmentSealed logs of these segments are not served by eth_getLogs. */
+  hideSegments: Set<bigint>;
+  /** Hide every SegmentSealed log (a provider that withholds seals). */
+  hideAllSeals: boolean;
+  /** Recipient behaviour by address hex. */
+  recipients: Map<string, RecipientBehaviour>;
+}
+
+export class FakeChain implements JsonRpc {
+  public readonly blocks: Block[] = [];
+  public readonly vault: VaultModel;
+  public readonly balances = new Map<string, bigint>();
+  public readonly nonces = new Map<string, bigint>();
+  public readonly code = new Map<string, Uint8Array>();
+  public readonly faults: Faults = { ambiguousSends: 0, hideSegments: new Set(), hideAllSeals: false, recipients: new Map() };
+  public readonly vaultCode = ascii('fake vault runtime');
+  public calls: string[] = [];
+  public autoMine = true;
+  private pool: Uint8Array[] = [];
+
+  private constructor(public readonly root: Root, public readonly gamma: Uint8Array, private readonly cfg: Config) {
+    this.vault = new VaultModel(gamma, { address: VAULT, chainId: CHAIN_ID, verifierCodeHash: cfg.verifierCodeHash }, TEST_PARAMS);
+    this.code.set(toHex(VAULT), this.vaultCode);
+  }
+
+  public static async create(root: Root, cfg: Config): Promise<FakeChain> {
+    const c = new FakeChain(root, encodeConfig(cfg), cfg);
+    await c.mine([]); // genesis
+    await c.mine([]); // the deployment block
+    return c;
+  }
+
+  public get domain(): Uint8Array {
+    return domainOf(this.gamma);
+  }
+
+  public fund(addr: Uint8Array, wei: bigint): void {
+    this.balances.set(toHex(addr), (this.balances.get(toHex(addr)) ?? 0n) + wei);
+  }
+
+  public balanceOf(addr: Uint8Array): bigint {
+    return this.balances.get(toHex(addr)) ?? 0n;
+  }
+
+  /** Mine one block with the given signed transactions, and certify the previous block (its UC goes in this block's companion). */
+  public async mine(raws: Uint8Array[]): Promise<void> {
+    const n = BigInt(this.blocks.length);
+    const receipts: Rcpt[] = [];
+    for (const raw of raws) receipts.push(await this.execute(raw));
+    let cum = 0n;
+    const enc = receipts.map((r) => {
+      cum += r.gas;
+      const logs = rlpList(r.logs.map((l) => rlpList([rlpBytes(l.address), rlpList(l.topics.map(rlpBytes)), rlpBytes(l.data)])));
+      return concat(Uint8Array.of(2), rlpList([rlpUintEnc(r.status), rlpUintEnc(cum), rlpBytes(new Uint8Array(256)), logs]));
+    });
+    const trie = buildTrie(enc.map((e, i) => [rlpIndexKey(i), e]), null);
+    const header: Header = {
+      parentHash: n === 0n ? new Uint8Array(32) : this.blocks[Number(n) - 1].hash, ommersHash: EMPTY_UNCLE_HASH, beneficiary: new Uint8Array(20),
+      stateRoot: sha(concat(ascii('state'), u256(n), ...raws)), transactionsRoot: sha(concat(ascii('txs'), ...raws)), receiptsRoot: trie.root,
+      logsBloom: new Uint8Array(256), difficulty: 0n, number: n, gasLimit: 30_000_000n, gasUsed: cum, timestamp: 1_700_000_000n + n, extraData: new Uint8Array(),
+      mixHash: new Uint8Array(32), nonce: new Uint8Array(8), baseFeePerGas: 7n, withdrawalsRoot: EMPTY_TRIE_ROOT, blobGasUsed: 0n, excessBlobGas: 0n,
+      parentBeaconBlockRoot: new Uint8Array(32),
+    };
+    const hash = HE(encodeHeader(header));
+    const parent = this.blocks[Number(n) - 1];
+    if (parent) parent.uc = await makeUc(this.root, EVM_PARTITION, parent.header.stateRoot, parent.hash, header.timestamp);
+    this.blocks.push({ header, hash, uc: null, receipts });
+  }
+
+  /** The verifier inside the vault: the plug-in's own relation (the Solidity verifier is NB2-05's). */
+  private async verifierAnswer(evidence: Uint8Array): Promise<{ ret: Uint8Array } | { revert: Uint8Array }> {
+    try {
+      return { ret: verdictAbi(await verifyReturn(this.gamma, evidence, this.root.trust, TEST_PARAMS)) };
+    } catch (e) {
+      if (e instanceof Nb2Error) return { revert: revertData(e.rule) };
+      throw e;
     }
   }
-  if (onPath && node.length >= 32) proof.push(node);
-  return node;
-}
 
-/** `(root, root-first proof of target)` of a trie of 32-byte keys. */
-export function trie(entries: [Uint8Array, Uint8Array][], target: Uint8Array): { root: Uint8Array; proof: Uint8Array[] } {
-  const e = entries.map(([k, v]) => [nibs(k), v] as [number[], Uint8Array]);
-  e.sort((a, b) => (a[0].join(',') < b[0].join(',') ? -1 : 1));
-  const proof: Uint8Array[] = [];
-  const root = build(e, 0, nibs(target), proof);
-  return { root: keccak256(root), proof: proof.reverse() };
-}
-
-// ---- EVM backing -------------------------------------------------------------------------------
-
-export function pdrBytes(epoch: bigint, setting: bigint): Uint8Array {
-  const params = concat(Uint8Array.of(0xa1), C.encodeTextString('chainId'), C.encodeTextString('7777'));
-  return C.encodeTag(39008, arr(
-    u(1), u(NETWORK), u(EVM_PARTITION), bs(Uint8Array.of(0x80)), u(1), C.encodeNull(), u(0), u(256), bs(new Uint8Array()),
-    u(2_500_000_000n + setting), C.encodeNull(), params, u(epoch), u(0),
-    arr(arr(C.encodeTextString('evm-1'), bs(signer(99).publicKey), u(1))),
-  ));
-}
-
-/** The genesis ConfigHash of {@link pdrBytes}: neutralised validators, epoch and activation round. */
-export function pdrConfigHash(): Uint8Array {
-  const raw = pdrBytes(5n, 0n);
-  const elems = splitArray(raw.subarray(3));
-  return H(C.encodeTag(39008, arr(...elems.slice(0, 12), u(0), u(0), C.encodeNull())));
-}
-
-function splitArray(b: Uint8Array): Uint8Array[] {
-  // a minimal splitter over the test's own canonical encodings
-  let pos = 1;
-  const n = b[0] & 0x1f;
-  const out: Uint8Array[] = [];
-  const skip = (): void => {
-    const ib = b[pos++];
-    const major = ib >> 5;
-    const ai = ib & 31;
-    let arg = ai;
-    if (ai === 24) arg = b[pos++];
-    else if (ai === 25) { arg = (b[pos] << 8) | b[pos + 1]; pos += 2; }
-    else if (ai === 26) { arg = b[pos] * 2 ** 24 + (b[pos + 1] << 16) + (b[pos + 2] << 8) + b[pos + 3]; pos += 4; }
-    else if (ai === 27) { arg = Number(Buffer.from(b.subarray(pos, pos + 8)).readBigUInt64BE()); pos += 8; }
-    if (major === 2 || major === 3) pos += arg;
-    else if (major === 4) for (let i = 0; i < arg; i++) skip();
-    else if (major === 5) for (let i = 0; i < arg * 2; i++) skip();
-  };
-  for (let i = 0; i < n; i++) {
-    const s = pos;
-    skip();
-    out.push(b.subarray(s, pos));
+  /** Run a call against a vault (the real one, or a copy for a simulation); events and the payout as effects. */
+  private async run(v: VaultModel, from: Uint8Array, to: Uint8Array, value: bigint, data: Uint8Array): Promise<{ ok: true; events: VaultEvent[] } | { ok: false; revert: Uint8Array }> {
+    if (!eq(to, VAULT)) return { ok: true, events: [] };
+    const before = v.events.length;
+    try {
+      const sel = data.subarray(0, 4);
+      const word = (i: number): Uint8Array => data.subarray(4 + 32 * i, 36 + 32 * i);
+      const dyn = (i: number): Uint8Array => {
+        const off = Number(beInt(word(i)));
+        const len = Number(beInt(data.subarray(4 + off, 36 + off)));
+        return data.subarray(36 + off, 36 + off + len);
+      };
+      if (eq(sel, SELECTOR.deposit)) v.deposit(value, dyn(0), word(1));
+      else if (eq(sel, SELECTOR.redeem)) {
+        const evidence = dyn(0);
+        const ver = await this.verifierAnswer(evidence);
+        const rcpt = (() => {
+          if (!('ret' in ver)) return 'accepts' as RecipientBehaviour;
+          return this.faults.recipients.get(toHex(ver.ret.subarray(140, 160))) ?? 'accepts';
+        })();
+        v.redeem(word(1), beInt(word(2)), dyn(3), ver, rcpt);
+      } else return { ok: false, revert: new Uint8Array() };
+      return { ok: true, events: v.events.slice(before) };
+    } catch (e) {
+      if (!(e instanceof Nb2Error)) throw e;
+      const vals = (e.args ?? []).map((a) => (a.startsWith('0x') ? fromHex(a.slice(2))! : BigInt(a)));
+      return { ok: false, revert: revertData(e.rule, ...vals) };
+    }
   }
-  return out;
+
+  private async execute(raw: Uint8Array): Promise<Rcpt> {
+    const { request: t, from, hash } = decodeSignedTx(raw);
+    const nonce = this.nonces.get(toHex(from)) ?? 0n;
+    if (t.nonce !== nonce) throw new Error(`fake chain: nonce ${t.nonce}, expected ${nonce}`);
+    this.nonces.set(toHex(from), nonce + 1n);
+    const fee = t.gas * 7n;
+    if (this.balanceOf(from) < fee + t.value) throw new Error('fake chain: insufficient funds');
+    this.balances.set(toHex(from), this.balanceOf(from) - fee);
+    const r = await this.run(this.vault, from, t.to, t.value, t.data);
+    if (!r.ok) return { status: 0n, logs: [], tx: hash, from, revert: r.revert, gas: t.gas, type: 2 };
+    this.balances.set(toHex(from), this.balanceOf(from) - t.value);
+    const logs: Log[] = [];
+    for (const e of r.events) {
+      if (e.name === 'Deposited') logs.push({ address: VAULT, topics: [TOPIC.Deposited, u256(e.n)], data: depositedData(this.domain, e.amount, e.rho, e.firstOwner) });
+      else if (e.name === 'Paid') {
+        logs.push({ address: VAULT, topics: [TOPIC.Paid, e.eta, concat(new Uint8Array(12), e.recipient)], data: u256(e.amount) });
+        this.fund(e.recipient, e.amount);
+      } else logs.push({ address: VAULT, topics: [TOPIC.SegmentSealed, u256(e.segment)], data: segmentSealedData(e.before, e.after, e.ids) });
+    }
+    return { status: 1n, logs, tx: hash, from, revert: null, gas: 150_000n, type: 2 };
+  }
+
+  // ---- JSON-RPC ----
+
+  private headerJson(b: Block): Record<string, unknown> {
+    const x = b.header;
+    return {
+      hash: h(b.hash), parentHash: h(x.parentHash), sha3Uncles: h(x.ommersHash), miner: h(x.beneficiary), stateRoot: h(x.stateRoot), transactionsRoot: h(x.transactionsRoot),
+      receiptsRoot: h(x.receiptsRoot), logsBloom: h(x.logsBloom), difficulty: q(x.difficulty), number: q(x.number), gasLimit: q(x.gasLimit), gasUsed: q(x.gasUsed),
+      timestamp: q(x.timestamp), extraData: h(x.extraData), mixHash: h(x.mixHash), nonce: h(x.nonce), baseFeePerGas: q(x.baseFeePerGas),
+      withdrawalsRoot: h(x.withdrawalsRoot), blobGasUsed: q(x.blobGasUsed), excessBlobGas: q(x.excessBlobGas), parentBeaconBlockRoot: h(x.parentBeaconBlockRoot),
+    };
+  }
+
+  private receiptJson(b: Block, i: number): Record<string, unknown> {
+    const r = b.receipts[i];
+    let cum = 0n;
+    for (let k = 0; k <= i; k++) cum += b.receipts[k].gas;
+    let logBase = 0;
+    for (let k = 0; k < i; k++) logBase += b.receipts[k].logs.length;
+    return {
+      type: '0x2', status: q(r.status), cumulativeGasUsed: q(cum), logsBloom: h(new Uint8Array(256)), blockHash: h(b.hash), blockNumber: q(b.header.number),
+      transactionIndex: q(i), transactionHash: h(r.tx), gasUsed: q(r.gas),
+      logs: r.logs.map((l, k) => ({ address: h(l.address), topics: l.topics.map(h), data: h(l.data), logIndex: q(logBase + k), blockNumber: q(b.header.number), blockHash: h(b.hash), transactionHash: h(r.tx) })),
+    };
+  }
+
+  private findTx(hash: string): [Block, number] | null {
+    for (const b of this.blocks) {
+      const i = b.receipts.findIndex((r) => h(r.tx) === hash);
+      if (i >= 0) return [b, i];
+    }
+    return null;
+  }
+
+  public async call<T>(method: string, params: any[]): Promise<T> {
+    this.calls.push(method);
+    const r = await this.dispatch(method, params);
+    return r as T;
+  }
+
+  private async dispatch(method: string, p: any[]): Promise<unknown> {
+    const top = this.blocks[this.blocks.length - 1];
+    switch (method) {
+      case 'eth_chainId': return q(CHAIN_ID);
+      case 'eth_blockNumber': return q(top.header.number);
+      case 'eth_maxPriorityFeePerGas': return q(1n);
+      case 'eth_getBlockByNumber': {
+        const b = p[0] === 'latest' ? top : this.blocks[Number(BigInt(p[0]))];
+        return b ? this.headerJson(b) : null;
+      }
+      case 'eth_getBlockByHash': {
+        if (p.length !== 2 || p[1] !== false) throw new RpcError(400, 0, 'eth_getBlockByHash takes [hash, false]');
+        const b = this.blocks.find((x) => h(x.hash) === p[0]);
+        return b ? this.headerJson(b) : null;
+      }
+      case 'eth_getTransactionReceipt': {
+        const f = this.findTx(p[0]);
+        return f ? this.receiptJson(f[0], f[1]) : null;
+      }
+      case 'eth_getBlockReceipts': {
+        const b = this.blocks.find((x) => h(x.hash) === p[0]);
+        return b ? b.receipts.map((_, i) => this.receiptJson(b, i)) : null;
+      }
+      case 'unicity_getSealCompanionV1': {
+        const i = this.blocks.findIndex((x) => h(x.hash) === p[0]);
+        if (i <= 0) return { status: 'unknown' };
+        return { status: 'found', companion: { witnesses: [h(this.blocks[i - 1].uc!), h(ascii('technical record'))] } };
+      }
+      case 'eth_getLogs': {
+        const f = p[0];
+        if (typeof f.address !== 'string' || typeof f.fromBlock !== 'string' || typeof f.toBlock !== 'string') throw new RpcError(400, 0, 'one address and a numeric window');
+        const lo = BigInt(f.fromBlock);
+        const hi = BigInt(f.toBlock);
+        if (hi - lo + 1n > 10_000n) throw new RpcError(400, 0, 'window over 10000 blocks');
+        const out: unknown[] = [];
+        for (const b of this.blocks.slice(Number(lo), Number(hi) + 1)) {
+          b.receipts.forEach((r, i) => {
+            if (r.status !== 1n) return;
+            const rj = this.receiptJson(b, i) as { logs: { address: string; topics: string[] }[] };
+            for (const l of rj.logs) {
+              if (l.address !== f.address) continue;
+              const ok = (f.topics as (string | string[] | null)[]).every((t, k) => t === null || (Array.isArray(t) ? t.includes(l.topics[k]) : l.topics[k] === t));
+              if (!ok) continue;
+              if (l.topics[0] === h(TOPIC.SegmentSealed) && (this.faults.hideAllSeals || this.faults.hideSegments.has(BigInt(l.topics[1])))) continue;
+              out.push(l);
+            }
+          });
+        }
+        return out;
+      }
+      case 'eth_call': case 'eth_estimateGas': {
+        const t = p[0];
+        const to = fromHex(t.to.slice(2))!;
+        const data = fromHex(t.data.slice(2))!;
+        if (method === 'eth_call' && eq(to, VAULT)) {
+          if (eq(data, SELECTOR.config)) return h(concat(u256(32), u256(this.gamma.length), this.gamma, new Uint8Array((32 - (this.gamma.length % 32)) % 32)));
+          if (eq(data, SELECTOR.state)) {
+            const s = this.vault.state();
+            return h(concat(u256(s.deposits), u256(s.segment), u256(s.population), u256(s.outstanding), s.head, s.previousHead));
+          }
+        }
+        const r = await this.run(this.vault.copy(), fromHex((t.from ?? '0x' + '00'.repeat(20)).slice(2))!, to, BigInt(t.value ?? '0x0'), data);
+        if (!r.ok) throw new RpcError(200, 3, `execution reverted: ${h(r.revert)}`, h(r.revert));
+        return method === 'eth_estimateGas' ? q(120_000n) : '0x';
+      }
+      case 'eth_getCode': return h(this.code.get(p[0].slice(2)) ?? new Uint8Array());
+      case 'eth_getBalance': return q(this.balanceOf(fromHex(p[0].slice(2))!));
+      case 'eth_getTransactionCount': {
+        const a = p[0].slice(2);
+        let n = this.nonces.get(a) ?? 0n;
+        if (p[1] === 'pending') n += BigInt(this.pool.filter((raw) => toHex(decodeSignedTx(raw).from) === a).length);
+        return q(n);
+      }
+      case 'eth_sendRawTransaction': {
+        const raw = fromHex(p[0].slice(2))!;
+        if (this.findTx(h(HE(raw))) !== null || this.pool.some((x) => eq(x, raw))) throw new RpcError(200, -32000, 'already known');
+        this.pool.push(raw);
+        if (this.autoMine) await this.flush();
+        if (this.faults.ambiguousSends > 0) {
+          this.faults.ambiguousSends--;
+          throw new RpcError(503, 0, 'broadcast may be partial');
+        }
+        return h(HE(raw));
+      }
+      default: throw new RpcError(200, -32601, `fake chain: no method ${method}`);
+    }
+  }
+
+  /** Mine the pool, then one empty block so the transactions' block is certified. */
+  public async flush(): Promise<void> {
+    const raws = this.pool;
+    this.pool = [];
+    await this.mine(raws);
+    await this.mine([]);
+  }
+
+  public dropPool(): void {
+    this.pool = [];
+  }
 }
 
-export function headerRlp(stateRoot: Uint8Array, number: bigint, fields: 20 | 21): Uint8Array {
-  const items: Uint8Array[] = [
-    encodeBytes(new Uint8Array(32).fill(0x33)), encodeBytes(EMPTY_UNCLE_HASH), encodeBytes(new Uint8Array(20).fill(0x44)),
-    encodeBytes(stateRoot), encodeBytes(new Uint8Array(32).fill(0x55)), encodeBytes(new Uint8Array(32).fill(0x66)),
-    encodeBytes(new Uint8Array(256)), encodeU64(0n), encodeU64(number), encodeU64(30_000_000n), encodeU64(21_000n),
-    encodeU64(1_700_000_000n), encodeBytes(text('native')), encodeBytes(new Uint8Array(32).fill(0x77)),
-    encodeBytes(new Uint8Array(8)), encodeU64(7n), encodeBytes(EMPTY_TRIE_ROOT), encodeU64(0n), encodeU64(0n),
-    encodeBytes(new Uint8Array(32).fill(0x88)),
-  ];
-  if (fields === 21) items.push(encodeBytes(new Uint8Array(32).fill(0x99)));
-  return encodeList(items);
-}
-
-// ---- unicity certificates ------------------------------------------------------------------------
-
-export interface Root {
-  /** The committee of the latest epoch: it signs this root's certificates. */
-  signers: [string, SigningService][];
-  /** Every entry from the genesis, canonical bytes. */
-  entries: Uint8Array[];
-  /** The release bundle (tag 39015) of {@link entries}. */
-  bundle: Uint8Array;
-  /** The genesis EntryID: the trust pin and every lock proof's `trustBaseId`. */
-  pin: Uint8Array;
-  trust: TrustInput;
-}
-
-const members = (signers: [string, SigningService][], weights?: number[]) =>
-  signers.map(([nodeId, s], i) => ({ nodeId, signingKey: s.publicKey, weight: BigInt(weights?.[i] ?? 1) }));
-/** A version-2 trust base entry (tag 39000) of the fixture network, encoded at the CBOR level: the SDK's entry class has no public constructor. */
-function entryBytes(f: {
-  epoch: bigint; epochStartRound: bigint; previousEntryId: Uint8Array; quorumThreshold: bigint;
-  rootNodes: { nodeId: string; signingKey: Uint8Array; weight: bigint }[]; signatures: Map<string, Uint8Array> | null;
-}): Uint8Array {
-  return C.encodeTag(39000n, C.encodeArray(
-    C.encodeUnsignedInteger(2n), C.encodeUnsignedInteger(BigInt(NETWORK)), C.encodeUnsignedInteger(f.epoch), C.encodeUnsignedInteger(f.epochStartRound),
-    C.encodeArray(...f.rootNodes.map((m) => C.encodeArray(C.encodeTextString(m.nodeId), C.encodeByteString(m.signingKey), C.encodeUnsignedInteger(m.weight)))),
-    C.encodeUnsignedInteger(f.quorumThreshold), C.encodeNull(), C.encodeNull(), C.encodeByteString(f.previousEntryId),
-    f.signatures === null ? C.encodeNull()
-      : C.encodeMap(new CborMap([...f.signatures].map(([id, sig]) => new CborMapEntry(C.encodeTextString(id), C.encodeByteString(sig))))),
-  ));
-}
-
-const thresholdOf = (weights: bigint[]): bigint => (2n * weights.reduce((a, b) => a + b, 0n)) / 3n + 1n;
-
-function committee(n: number, seed: number): [string, SigningService][] {
-  const signers: [string, SigningService][] = Array.from({ length: n }, (_, i) => [`root-${seed}-${String(i).padStart(2, '0')}`, signer(seed + i)] as [string, SigningService]);
-  return signers.sort((a, b) => (a[0] < b[0] ? -1 : 1));
-}
-
-async function rootOf(signers: [string, SigningService][], entries: Uint8Array[], pin: Uint8Array): Promise<Root> {
-  const bundle = await TrustBaseBundle.encode(entries.map((e) => RootTrustBaseV2.decode(e)));
-  return { signers, entries, bundle, pin, trust: await TrustInput.fromBundle(bundle, pin) };
-}
-
-/** A trust base history holding only a genesis entry of epoch `epoch` (start round 1) with `n` members, unit weights unless given. */
-export async function makeRoot(epoch: number, n: number, seed: number, weights?: number[]): Promise<Root> {
-  const signers = committee(n, seed);
-  const rootNodes = members(signers, weights);
-  const genesisBytes = entryBytes({
-    epoch: BigInt(epoch), epochStartRound: 1n, previousEntryId: new Uint8Array(32), quorumThreshold: thresholdOf(rootNodes.map((m) => m.weight)), rootNodes,
-    signatures: null,
-  });
-  return rootOf(signers, [genesisBytes], await RootTrustBaseV2.decode(genesisBytes).entryId());
-}
+// ---- a whole simulated deployment --------------------------------------------------------------------
 
 /**
- * The next epoch of `root`, from root round `start`: a committee of `n` members (seed `seed`), witnessed by every member of the current one.
- * Same pin, one more entry; the new committee signs the new root's certificates.
+ * The bound without its build check: the world's verifier is a stand-in, not the calibrated build, so its tests supply the model as a
+ * wallet supplies its own (gas.test.ts and preflight.test.ts check the default's refusal of another build).
  */
-export async function nextEpoch(root: Root, start: bigint, n: number, seed: number, weights?: number[]): Promise<Root> {
-  return rootOf(committee(n, seed), [...root.entries, await successorEntry(root, start, n, seed, weights)], root.pin);
-}
+const BOUND = new MeasuredGasModel();
+export const WORLD_GAS: GasModel = { name: BOUND.name, redeemGasLimit: (s) => BOUND.redeemGasLimit(s), depositGasLimit: () => BOUND.depositGasLimit() };
 
-/** The canonical bytes of the entry {@link nextEpoch} appends, witnessed by `witnesses` (the current committee unless given). */
-export async function successorEntry(root: Root, start: bigint, n: number, seed: number, weights?: number[], witnesses = root.signers): Promise<Uint8Array> {
-  const tip = RootTrustBaseV2.decode(root.entries[root.entries.length - 1]);
-  const rootNodes = members(committee(n, seed), weights);
-  const fields = { epoch: tip.epoch + 1n, epochStartRound: start, previousEntryId: await tip.entryId(), quorumThreshold: thresholdOf(rootNodes.map((m) => m.weight)), rootNodes };
-  // the entry id and the witnesses' message are over the entry with a null signature field
-  const hash = await new DataHasher(HashAlgorithm.SHA256).update(entryBytes({ ...fields, signatures: null })).digest();
-  const signatures = new Map<string, Uint8Array>();
-  for (const [id, s] of witnesses) signatures.set(id, (await s.sign(hash)).encode());
-  return entryBytes({ ...fields, signatures });
-}
-
-export interface UcSpec {
-  partition: number;
-  conf: Uint8Array;
-  epochIr: bigint;
-  rootEpoch: bigint;
-  round: bigint;
-  timestamp: bigint;
-  stateHash: Uint8Array;
-  blockHash: Uint8Array | null;
-  signers: number;
-  /** Override the seal's committed unicity-tree root (to test a false root). */
-  sealHash?: Uint8Array;
-  network?: number;
-  /** Extra signers keyed by id (strangers or wrong-key signatures). */
-  extra?: [string, SigningService][];
-  shard?: { bytes: Uint8Array; siblings: Uint8Array[] };
-}
-
-/** Every fixture certificate's technical record hash (natively it is always 32 bytes). */
-const TECHNICAL_RECORD_HASH = sha(text('technical record'));
-
-export async function makeUc(root: Root, s: UcSpec): Promise<UnicityCertificate> {
-  // Native-valid records (bft-go-base IsValid, checked by the SDK): an aggregator round that changes the state always has a block
-  const blockHash = s.blockHash ?? (s.partition === AGG_PARTITION ? sha(concat(text('aggregator block'), s.stateHash)) : null);
-  const ir = new InputRecord(s.round, s.epochIr, null, s.stateHash, new Uint8Array(), s.timestamp, blockHash, 0n, null);
-  const shard = s.shard ? ShardId.decode(s.shard.bytes) : ShardId.decode(Uint8Array.of(0x80));
-  const stc = new ShardTreeCertificate(shard, s.shard?.siblings ?? []);
-  const shardRoot = await UnicityCertificate.calculateShardTreeCertificateRootHash(ir, TECHNICAL_RECORD_HASH, s.conf, stc);
-  const key = new Uint8Array(4);
-  new DataView(key.buffer).setUint32(0, s.partition);
-  const unicityTreeHash = sha(bs(shardRoot.data));
-  const treeRoot = sha(concat(bs(Uint8Array.of(1)), bs(key), bs(unicityTreeHash)));
-  const signers = new Map<string, SigningService>(root.signers.slice(0, s.signers));
-  for (const [id, sg] of s.extra ?? []) signers.set(id, sg);
-  const seal = await UnicitySeal.create(
-    NetworkId.fromId(s.network ?? NETWORK), s.round, s.rootEpoch, s.timestamp, null, s.sealHash ?? treeRoot, signers,
-  );
-  return new UnicityCertificate(ir, TECHNICAL_RECORD_HASH, s.conf, stc, new UnicityTreeCertificate(BigInt(s.partition), []), seal);
-}
-
-// ---- the world ---------------------------------------------------------------------------------
-
-export interface World {
-  agg: Root;
-  evm: Root;
-  dep: Deployment;
-  bridge: NativeBridge;
-  policy: Policy;
-  /** The fixture topology depth (0: one shard `80`; 1: shards `40` and `c0`). The policy names none of it. */
-  depth: 0 | 1;
-  /** The configuration hash of the first shard (the only one at depth 0). */
-  aggConf: Uint8Array;
-  /** The configuration hash of every fixture shard, in shard byte order. */
-  aggConfs: Uint8Array[];
-}
-
-const FIXTURE_SHARDS: readonly (readonly Uint8Array[])[] = [[Uint8Array.of(0x80)], [Uint8Array.of(0x40), Uint8Array.of(0xc0)]];
-/** The native shard ID of fixture shard `row`. */
-export const shardOf = (w: Pick<World, 'depth'>, row: number): Uint8Array => FIXTURE_SHARDS[w.depth][row];
-/** The fixture shard (row) a state ID falls in: the top `depth` bits. */
-export const rowOf = (w: Pick<World, 'depth'>, sid: Uint8Array): number => (w.depth === 0 ? 0 : sid[0] >> 7);
-
-export async function makeWorld(headerFields: 20 | 21 = 20, depth: 0 | 1 = 0): Promise<World> {
-  const agg = await makeRoot(2, 4, 10);
-  const evm = await makeRoot(2, 4, 10);
-  const aggConfs = Array.from({ length: 1 << depth }, (_, i) => sha(text(`aggregator shard configuration ${i}`)));
-  if (depth === 0) aggConfs[0] = sha(text('aggregator shard configuration'));
-  const aggConf = aggConfs[0];
-  const policy: Policy = makePolicy(AGG_PARTITION);
-  const cfg = {
-    network: NETWORK, rootGenesis: ROOT_GENESIS, chainId: CHAIN_ID, executionGenesis: EXEC_GENESIS, evmPartition: EVM_PARTITION,
-    evmShard: Uint8Array.of(0x80), vault: VAULT, zeroAddress: ZERO20,
-    ty: deriveType(NETWORK, ROOT_GENESIS, EXEC_GENESIS, CHAIN_ID), aid: deriveAsset(NETWORK, ROOT_GENESIS, EXEC_GENESIS, CHAIN_ID),
-    semanticProfileHash: sha(text('semantic profile v2')), tokenVerifierAddress: new Uint8Array(20).fill(0xbb),
-    tokenVerifierCodeHash: sha(text('token verifier runtime')), b1ProfileHash: sha(text('b1 profile')),
-    aggregatorPolicyHash: policyHash(policy),
+export async function setup() {
+  const root = await makeRoot();
+  const cfg = makeConfig(root);
+  const chain = await FakeChain.create(root, cfg);
+  const agg = new FakeAggregator(root);
+  const pins = {
+    gamma: chain.gamma, build: 'test' as const, vaultRuntimeCodeHash: HE(chain.vaultCode), maxEncodedTxBytes: 524_288n, userGasLimit: 60_000_000n,
+    gasReserve: 500_000n, returnReserveSegments: 64n, deploymentBlock: 1n, stateReadOnly: false,
   };
-  const dep = makeDeployment(cfg, sha(text('vault runtime')), pdrConfigHash(), { fields: headerFields }, policy);
-  const bridge = new NativeBridge(new DeploymentRegistry([dep]), agg.trust);
-  return { agg, evm, dep, bridge, policy, depth, aggConf, aggConfs };
-}
-
-export interface EvmSpec {
-  vaultCodeHash: Uint8Array;
-  stored?: Uint8Array;
-  nonce: bigint;
-  blockNumber: bigint;
-}
-
-export interface MintSpec {
-  nonce: bigint;
-  amount: Uint8Array;
-  owner: SigningService;
-  mintDeadline: bigint | null;
-  evm: EvmSpec;
-}
-
-export function spec(owner: number): MintSpec {
-  return {
-    nonce: 1n, amount: Uint8Array.of(3, 232), owner: signer(owner), mintDeadline: null,
-    evm: { vaultCodeHash: sha(text('vault runtime')), nonce: 1n, blockNumber: 1234n },
-  };
-}
-
-export interface LockParts extends Omit<LockProof, 'uc'> {
-  uc: UnicityCertificate;
-  ucSpec: UcSpec;
-  ucRaw?: Uint8Array;
-}
-
-export const ownerPredicate = (s: SigningService): EncodedPredicate => EncodedPredicate.fromPredicate(SignaturePredicate.create(s.publicKey));
-
-export function digestOf(w: World, s: MintSpec): { digest: Uint8Array; salt: Uint8Array; tokenId: Uint8Array } {
-  const salt = deriveSalt(w.dep.cfgHash, s.nonce);
-  const tokenId = deriveTokenId(salt, NETWORK);
-  const p0 = sha(ownerPredicate(s.owner).toCBOR());
-  const digest = lockDigest(w.dep.cfgHash, s.nonce, lockRecord(ZERO20, w.dep.cfg.ty, w.dep.cfg.aid, s.amount, tokenId, p0));
-  return { digest, salt, tokenId };
-}
-
-export async function lockParts(w: World, s: MintSpec): Promise<LockParts> {
-  const { digest } = digestOf(w, s);
-  const stored = s.evm.stored ?? digest;
-  let i = 0;
-  while (i < 32 && stored[i] === 0) i++;
-  const skey = storageTrieKey(lockDigestSlot(s.evm.nonce));
-  const other = storageTrieKey(lockDigestSlot(4242n));
-  const st = trie([[skey, encodeBytes(stored.subarray(i))], [other, encodeBytes(Uint8Array.of(1, 2, 3))]], skey);
-  const acct = encodeList([encodeU64(1n), encodeBytes(Uint8Array.of(0x0f, 0x42)), encodeBytes(st.root), encodeBytes(s.evm.vaultCodeHash)]);
-  const akey = accountTrieKey(VAULT);
-  const otherAcct = encodeList([encodeU64(0n), encodeBytes(new Uint8Array()), encodeBytes(st.root), encodeBytes(new Uint8Array(32))]);
-  const ac = trie([[akey, acct], [accountTrieKey(new Uint8Array(20).fill(0xcc)), otherAcct]], akey);
-  const header = headerRlp(ac.root, s.evm.blockNumber, w.dep.header.fields);
-  const pdr = pdrBytes(5n, 0n);
-  const ucSpec: UcSpec = {
-    partition: EVM_PARTITION, conf: sha(pdr), epochIr: 5n, rootEpoch: 2n, round: 500n, timestamp: 1_700_000_100n,
-    stateHash: ac.root, blockHash: keccak256(header), signers: 4,
-  };
-  const uc = await makeUc(w.evm, ucSpec);
-  return { cfg: w.dep.cfgHash, trustBaseId: w.agg.trust.id, pdr, uc, ucSpec, header, accountNodes: ac.proof, storageNodes: st.proof };
-}
-
-export const encodeParts = (p: LockParts): Uint8Array => encodeLockProof({ ...p, uc: p.ucRaw ?? p.uc.toCBOR() });
-
-export type Step =
-  | { kind: 'transfer'; to: SigningService; mask: number; deadline: bigint | null; t: bigint }
-  | { kind: 'burn'; recipient: Uint8Array; deadline: bigint | null; t: bigint }
-  | { kind: 'burnWith'; reason: Uint8Array; t: bigint };
-
-export const txStep = (to: number, mask: number, t: bigint, deadline: bigint | null = null): Step => ({ kind: 'transfer', to: signer(to), mask, deadline, t });
-export const recipient20 = (): Uint8Array => new Uint8Array(20).fill(0xd0);
-export const burnStep = (t: bigint): Step => ({ kind: 'burn', recipient: recipient20(), deadline: null, t });
-
-/** Post-construction mutations applied with consistent hashes, so exactly one guard fires. */
-export interface Tweaks {
-  mintTy?: Uint8Array;
-  mintNetwork?: number;
-  mintData?: Uint8Array | null;
-  mintJustification?: Uint8Array | null;
-  mintSalt?: Uint8Array;
-  cdDeadline?: [number, bigint | null][];
-  unlock?: [number, (u: Uint8Array) => Uint8Array][];
-  transferData?: [number, Uint8Array | null][];
-  minterOverride?: SigningService;
-  proofTime?: [number, bigint][];
-  /** The root round of the certificate of leaf `i`; leaves of one shard in different rounds get different UCs. */
-  ucRound?: (i: number) => bigint;
-  /** `[i, partition]`: leaf `i` alone is certified in `partition`, under its own certificate (every other leaf as below). */
-  ucPartitionAt?: [number, number];
-  /** The aggregation partition every leaf is certified in (default the deployment's). */
-  ucPartition?: number;
-  /** Extra signatures on every aggregator certificate (strangers count toward the supplied-signature bound). */
-  ucExtra?: [string, SigningService][];
-}
-
-export interface TokenOut {
-  token: Token;
-  bytes: Uint8Array;
-  /** The first certificate (the only one when every leaf is in one shard and round). */
-  uc: UnicityCertificate;
-  /** Every distinct certificate, in first-use leaf order. */
-  ucs: UnicityCertificate[];
-  leaves: [Uint8Array, Uint8Array][];
-}
-
-export async function buildToken(w: World, s: MintSpec, steps: Step[], mintT: bigint, ucTs: bigint, tw: Tweaks = {}, parts?: LockParts): Promise<TokenOut> {
-  const lp = parts ?? (await lockParts(w, s));
-  const { salt } = digestOf(w, s);
-  const journal = encodeJustification(CHAIN_ID, VAULT, ZERO20, s.nonce, encodeParts(lp));
-  const mint = await MintTransaction.create(NetworkId.fromId(tw.mintNetwork ?? NETWORK), SignaturePredicate.create(s.owner.publicKey), {
-    data: tw.mintData === undefined ? valueEnvelope(w.dep.cfg.aid, s.amount) : tw.mintData,
-    expiresAt: s.mintDeadline,
-    justification: tw.mintJustification === undefined ? journal : tw.mintJustification,
-    salt: TokenSalt.fromBytes(tw.mintSalt ?? salt),
-    tokenType: new TokenType(tw.mintTy ?? w.dep.cfg.ty),
+  const options = (seed: string, store = new MemoryJournalStore()): BridgeOptions => ({
+    pins, trust: root.trust, rpc: chain, aggregator: agg, journal: store, bridgeKey: deriveBridgeKey(key(seed)), backup: async () => {},
+    receiptTimeoutMs: 0, pollMs: 0, sleep: async () => {}, gas: WORLD_GAS,
   });
-  return assembleToken(w, s, mint, tw, steps, mintT, ucTs);
+  return { root, cfg, chain, agg, pins, options };
 }
 
-const unlockFor = async (tx: { calculateTransactionHash(): Promise<unknown> }, signingService: SigningService): Promise<Uint8Array> =>
-  (await SignaturePredicateUnlockScript.create(tx as never, signingService)).encode();
+export const evmAccount = (chain: FakeChain, seed: string): LocalKeySigner => {
+  const s = new LocalKeySigner(key(`evm ${seed}`));
+  chain.fund(s.address, 10n ** 24n);
+  return s;
+};
 
-function cdBytes(lock: EncodedPredicate, sourceHash: Uint8Array, txHash: Uint8Array, e: bigint | null, unlock: Uint8Array): Uint8Array {
-  return C.encodeTag(39031, arr(u(2), lock.toCBOR(), bs(sourceHash), bs(txHash), C.encodeNullable(e, C.encodeUnsignedInteger), bs(unlock)));
-}
-
-export async function assembleToken(w: World, s: MintSpec, mint: MintTransaction, tw: Tweaks, steps: Step[], mintT: bigint, ucTs: bigint): Promise<TokenOut> {
-  interface Item { txBytes: Uint8Array; cd: Uint8Array; sid: Uint8Array; txHash: Uint8Array; t: bigint }
-  const items: Item[] = [];
-  const tweakUnlock = (i: number, un: Uint8Array): Uint8Array => (tw.unlock ?? []).filter(([k]) => k === i).reduce((a, [, f]) => f(a), un);
-  const cdDeadline = (i: number, e: bigint | null): bigint | null => {
-    const f = (tw.cdDeadline ?? []).find(([k]) => k === i);
-    return f ? f[1] : e;
-  };
-  const minterService = tw.minterOverride ?? (await MintSigningService.create(mint.tokenId));
-  const mintHash = await mint.calculateTransactionHash();
-  const mintUnlock = tweakUnlock(0, (await SignaturePredicateUnlockScript.create(mint, minterService)).encode());
-  const mintSid = sha(arr(mint.lockScript.toCBOR(), bs(mint.sourceStateHash.data)));
-  items.push({ txBytes: mint.toCBOR(), cd: cdBytes(mint.lockScript, mint.sourceStateHash.data, mintHash.data, cdDeadline(0, mint.expiresAt), mintUnlock), sid: mintSid, txHash: mintHash.data, t: mintT });
-  let state = (await mint.calculateStateHash()).data;
-  let stateHash = await mint.calculateStateHash();
-  let lock = mint.recipient;
-  let curOwner = s.owner;
-  for (let k = 0; k < steps.length; k++) {
-    const i = k + 1;
-    const st = steps[k];
-    let recipient: EncodedPredicate;
-    let mask: Uint8Array;
-    let data: Uint8Array | null = null;
-    let deadline: bigint | null;
-    let t: bigint;
-    let nextOwner: SigningService | null = null;
-    if (st.kind === 'transfer') {
-      recipient = ownerPredicate(st.to); mask = new Uint8Array(32).fill(st.mask); deadline = st.deadline; t = st.t; nextOwner = st.to;
-    } else {
-      const reason = st.kind === 'burn' ? returnReason(CHAIN_ID, VAULT, ZERO20, w.dep.cfg.ty, w.dep.cfg.aid, st.recipient, s.amount) : st.reason;
-      recipient = EncodedPredicate.fromPredicate(BurnPredicate.create(sha(reason)));
-      mask = new Uint8Array(32).fill(0x42); data = reason; deadline = st.kind === 'burn' ? st.deadline : null; t = st.t;
-    }
-    const td = (tw.transferData ?? []).find(([idx]) => idx === i);
-    if (td) data = td[1];
-    const txBytes = C.encodeTag(39045, arr(u(2), recipient.toCBOR(), bs(mask), C.encodeNullable(data, C.encodeByteString), C.encodeNullable(deadline, C.encodeUnsignedInteger)));
-    const tx = TransferTransaction.fromCBOR(txBytes, stateHash, lock);
-    const th = await tx.calculateTransactionHash();
-    const unlock = tweakUnlock(i, await unlockFor(tx, signerService(curOwner)));
-    items.push({ txBytes, cd: cdBytes(lock, stateHash.data, th.data, cdDeadline(i, deadline), unlock), sid: sha(arr(lock.toCBOR(), bs(stateHash.data))), txHash: th.data, t });
-    stateHash = await tx.calculateStateHash();
-    state = stateHash.data;
-    lock = recipient;
-    if (nextOwner) curOwner = nextOwner;
-  }
-  void state;
-  const values = items.map((it) => leafValue(it.txHash, it.t));
-  const factory = new DataHasherFactory(HashAlgorithm.SHA256, NodeDataHasher);
-  // One tree and one certificate per (shard row, root round): leaves of a shard certified in different
-  // rounds are separate anchors even when every other field is equal.
-  const groups = new Map<string, { row: number; round: bigint; members: number[] }>();
-  items.forEach((it, i) => {
-    const row = rowOf(w, it.sid);
-    const round = tw.ucRound ? tw.ucRound(i) : 900n;
-    const key = tw.ucPartitionAt?.[0] === i ? `alone:${i}` : `${row}:${round}`;
-    const g = groups.get(key) ?? { row, round, members: [] };
-    g.members.push(i);
-    groups.set(key, g);
-  });
-  const certOf: { root: Awaited<ReturnType<SparseMerkleTree['calculateRoot']>>; uc: UnicityCertificate }[] = new Array(items.length);
-  const ucs: UnicityCertificate[] = [];
-  for (const g of groups.values()) {
-    const smt = new SparseMerkleTree(factory);
-    for (const i of g.members) await smt.addLeaf(items[i].sid, values[i]);
-    const root = await smt.calculateRoot();
-    const uc = await makeUc(w.agg, {
-      partition: tw.ucPartitionAt?.[0] === g.members[0] && g.members.length === 1 ? tw.ucPartitionAt[1] : tw.ucPartition ?? AGG_PARTITION, conf: w.aggConfs[g.row], epochIr: 1n, rootEpoch: 2n, round: g.round, timestamp: ucTs, stateHash: root.hash.data,
-      blockHash: null, signers: 4, extra: tw.ucExtra,
-      shard: { bytes: shardOf(w, g.row), siblings: w.depth === 0 ? [] : [sha(text(`sibling of shard ${g.row}`))] },
-    });
-    for (const i of g.members) certOf[i] = { root, uc };
-  }
-  // Certificates in first-use leaf order.
-  for (let i = 0; i < items.length; i++) if (!ucs.includes(certOf[i].uc)) ucs.push(certOf[i].uc);
-  const proofs = items.map((it, i) => {
-    const t = (tw.proofTime ?? []).find(([k]) => k === i)?.[1] ?? it.t;
-    const cert = InclusionCertificate.create(certOf[i].root, it.sid);
-    return C.encodeTag(39033, arr(u(1), it.cd, u(t), bs(cert.encode()), certOf[i].uc.toCBOR()));
-  });
-  const certified = items.map((it, i) => arr(it.txBytes, proofs[i]));
-  const bytes = C.encodeTag(39040, arr(u(2), certified[0], arr(...certified.slice(1))));
-  const token = await Token.fromCBOR(bytes);
-  return { token, bytes, uc: ucs[0], ucs, leaves: items.map((it, i) => [it.sid, values[i]]) };
-}
-
-/** Certify one request alone (one leaf, its own certificate): what a host's aggregator returns for a submitted request. */
-export async function certifyRequest(w: World, cd: CertificationData, t: bigint, ucTs: bigint, round = 900n): Promise<InclusionProof> {
-  const sid = (await StateId.fromCertificationData(cd)).data;
-  const smt = new SparseMerkleTree(new DataHasherFactory(HashAlgorithm.SHA256, NodeDataHasher));
-  await smt.addLeaf(sid, leafValue(cd.transactionHash.data, t));
-  const root = await smt.calculateRoot();
-  const row = rowOf(w, sid);
-  const uc = await makeUc(w.agg, {
-    partition: AGG_PARTITION, conf: w.aggConfs[row], epochIr: 1n, rootEpoch: 2n, round, timestamp: ucTs, stateHash: root.hash.data, blockHash: null, signers: 4,
-    shard: { bytes: shardOf(w, row), siblings: w.depth === 0 ? [] : [sha(text(`sibling of shard ${row}`))] },
-  });
-  return InclusionProof.fromCBOR(C.encodeTag(39033, arr(u(1), cd.toCBOR(), u(t), bs(InclusionCertificate.create(root, sid).encode()), uc.toCBOR())));
-}
-
-// The signer service for a SigningService key owner (identity).
-const signerService = (s: SigningService): SigningService => s;
-
-export { concat };

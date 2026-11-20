@@ -31,8 +31,8 @@ export class Chain {
   sent = 0;
   backoffMs = 0;
 
-  constructor(url: string, readonly addresses: Addresses, readonly spacingMs = 250) {
-    this.evm = new Evm(url, 0n);
+  constructor(url: string, readonly addresses: Addresses, readonly spacingMs = 250, evm?: Pick<Evm, 'rpc'>) {
+    this.evm = (evm as Evm | undefined) ?? new Evm(url, 0n);
   }
 
   /** One raw JSON-RPC request through the queue (spacing and backoff). */
@@ -85,6 +85,7 @@ export class Chain {
 
 // ---- small value helpers ------------------------------------------------------------------------------------------------------------------------
 export const big = (v: Value | undefined): bigint => (typeof v === 'bigint' ? v : 0n);
+export const num = (v: Value | undefined): number => Number(big(v));
 export const str = (v: Value | undefined): string => (typeof v === 'string' ? v : '');
 export const obj = (v: Value | undefined): Record<string, Value> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, Value>) : {});
 export const arr = (v: Value | undefined): Value[] => (Array.isArray(v) ? v : []);
