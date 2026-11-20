@@ -15,12 +15,12 @@ import { abs, DEFAULTS, loadSettings, pinOverridden, saveSettings, type Settings
 import { isAddress } from './evm.js';
 import * as faucet from './faucet.js';
 import { forgeRelabelled, forgeUnknownKeys, sealTable, verdict } from './forge.js';
-import { acceptToken, Handoff, type Peer } from './handoff.js';
+import { acceptToken, announceHandoff, Handoff, type Peer } from './handoff.js';
 import { fmtUnits, hex, parseUnits, sleep, unhex, waitFor } from './hex.js';
 import { acquireWriter, IdbKv } from './idb.js';
 import { CONFIRM_WORD, confirmed, valueAtRisk } from './importguard.js';
 import { legacyKeysOf } from './work.js';
-import { READ_ONLY_OK, VALUE_STEPS, importBlock, refusal } from './guard.js';
+import { READ_ONLY_OK, VALUE_STEPS, importBlock, OperationGuard, refusal } from './guard.js';
 import { burnerFrom, loadExisting, loadOrCreateDurable, parseBackup, replaceKeyDurable, toMnemonic, type Burner } from './keys.js';
 import * as nb2 from './nb2.js';
 import { checkRevision, fetchRelease, type Published } from './release.js';
@@ -45,6 +45,7 @@ let published: Published | null = null;
 let session: nb2.Session | null = null;
 let currentId: string | null = load('current');
 let busy: string | null = null;
+const opGuard = new OperationGuard();
 let balance: bigint | null = null;
 let intentMark: string | null = null;
 /** null: the durable store is ready and this page is the profile's one writer; else why the wallet will not move value */
@@ -89,7 +90,7 @@ async function backupIntents(i: IntentsRecord): Promise<void> {
 
 /** Run one step: its trace is kept for the drawer, its outcome shown on its row. */
 async function step(key: string, fn: () => Promise<string | void>): Promise<void> {
-  if (busy) return;
+  if (!opGuard.tryEnter(key)) return;
   busy = key;
   status.delete(key);
   render();
@@ -109,6 +110,7 @@ async function step(key: string, fn: () => Promise<string | void>): Promise<void
     end(t);
     traces.set(key, t);
     busy = null;
+    opGuard.leave();
     render();
     setTimeout(verifyReceived, 0);
   }
@@ -317,7 +319,7 @@ const STEPS: StepDef[] = [
   },
   {
     key: 'transfer', title: 'Transfer to another tab', phase: ['minted'], when: (t) => !t.burning, what: 'A certified transfer to the other tab\'s public key, then the token file goes over a BroadcastChannel. The wallet stores the exact request (with its random state mask) before it certifies it, so a retry certifies the same request. The receiver stores the file, then verifies it offline.',
-    input: () => h('span', {}, h('button', { class: 'link', disabled: !ready || !!handoff, onclick: enableHandoff }, handoff ? 'handoff on' : 'take part in handoff'), ' ', peerSelect, ' ', h('button', { class: 'link', onclick: () => window.open(`?w=${PROFILE === 'b' ? 'a' : 'b'}`, '_blank') }, `open tab ${PROFILE === 'b' ? 'A' : 'B'}`)),
+    input: () => h('span', {}, h('button', { class: 'link', disabled: !ready || !!handoff || !!busy, onclick: () => void step('handoff', enableHandoff) }, handoff ? 'handoff on' : 'take part in handoff'), ' ', peerSelect, ' ', h('button', { class: 'link', onclick: () => window.open(`?w=${PROFILE === 'b' ? 'a' : 'b'}`, '_blank') }, `open tab ${PROFILE === 'b' ? 'A' : 'B'}`)),
     note: (t) => (t?.pending ? `A transfer built ${new Date(t.pending.at).toLocaleTimeString()} for tab ${t.pending.toProfile.toUpperCase()} is stored: Run certifies that same request, it never builds another.` : undefined),
     run: async () => {
       const t = currentOr('select a token');
@@ -442,11 +444,12 @@ let handoff: Handoff | undefined;
 /** true once this page has announced itself: key import is then refused until the page is reloaded */
 let handoffEver = false;
 /** Opt in: a tab announces its receiving key only when asked (and ready, and for this deployment), so an import can never race a sender that holds an announcement. */
-function enableHandoff(): void {
-  if (!ready || !session || handoff) return;
-  handoff = new Handoff(PROFILE, hex(session.bridge.domain), me, handoffHandlers);
+async function enableHandoff(): Promise<string> {
+  if (!session || handoff) return 'handoff is on';
+  const domain = hex(session.bridge.domain);
+  handoff = await announceHandoff(kv, () => new Handoff(PROFILE, domain, me, handoffHandlers));
   handoffEver = true;
-  render();
+  return 'handoff on: this tab now announces its key to tabs of this deployment';
 }
 
 /** Verify one received record: the plug-in and the owner check; then it is a held token ('minted'). A failure is kept on the record. */

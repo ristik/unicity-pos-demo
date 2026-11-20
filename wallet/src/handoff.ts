@@ -100,3 +100,12 @@ export async function acceptToken(bridge: NativeBridgeV2, bytesHex: string, myPu
   if (verified.owner === null || !eqBytes(verified.owner, myPublicKey)) throw new Error('the token verifies, but its owner is another key: not addressed to this wallet');
   return { bytes, verified };
 }
+
+/** The durable "has announced" marker, in the profile. Once present, key import is refused across reloads: a sender may hold the key. */
+export const ANNOUNCED_KEY = 'handoff/announced';
+
+/** Commit the marker (durably) BEFORE the first broadcast, then create the Handoff, which announces. */
+export async function announceHandoff<T>(kv: { put(k: string, v: string): Promise<void> }, create: () => T): Promise<T> {
+  await kv.put(ANNOUNCED_KEY, new Date().toISOString());
+  return create();
+}

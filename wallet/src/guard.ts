@@ -34,6 +34,19 @@ export function refusal(step: string, g: GuardState): string | null {
 export function importBlock(keys: string[], legacy: boolean, handoffAnnounced: boolean): string | null {
   const used = keys.filter((k) => k !== 'secret/key');
   if (!used.length && !legacy && !handoffAnnounced) return null;
-  const why = used.length ? `this profile holds ${used.length} record${used.length === 1 ? '' : 's'}` : handoffAnnounced ? 'this page has taken part in a handoff (reload the page first)' : 'this profile holds records of an older build';
+  const why = used.includes('handoff/announced') ? 'this profile has announced its key to other tabs (a sender may hold it)' : used.length ? `this profile holds ${used.length} record${used.length === 1 ? '' : 's'}` : handoffAnnounced ? 'this page has taken part in a handoff (reload the page first)' : 'this profile holds records of an older build';
   return `a key can be imported only into an empty profile that has not announced itself in this page's lifetime (${why}): use a new profile (?w=...) to import`;
+}
+
+/** One operation at a time: key import, handoff opt-in and every step go through it, so none can interleave with another. */
+export class OperationGuard {
+  busy: string | null = null;
+  tryEnter(key: string): boolean {
+    if (this.busy !== null) return false;
+    this.busy = key;
+    return true;
+  }
+  leave(): void {
+    this.busy = null;
+  }
 }

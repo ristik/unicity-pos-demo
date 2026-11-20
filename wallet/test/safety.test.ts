@@ -5,8 +5,8 @@ import { test } from 'node:test';
 import { AmbiguousBroadcast } from '@unicitylabs/native-bridge-plugin/nb2';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 
-import { READ_ONLY_OK, VALUE_STEPS, importBlock, refusal } from '../src/guard.js';
-import { Handoff, parseMessage } from '../src/handoff.js';
+import { OperationGuard, READ_ONLY_OK, VALUE_STEPS, importBlock, refusal } from '../src/guard.js';
+import { ANNOUNCED_KEY, Handoff, announceHandoff, parseMessage } from '../src/handoff.js';
 import { hex } from '../src/hex.js';
 import { IdbKv } from '../src/idb.js';
 import { burnerFrom, replaceKeyDurable } from '../src/keys.js';
@@ -148,4 +148,40 @@ test('#4 funding: the stored transaction survives every ambiguous outcome and is
   const ok = { receipt: async () => (++polls > 2 ? { status: '0x1' } : null), sendRaw: async () => null };
   assert.equal((await driveFunding(ok, rec, clear)).status, '0x1');
   assert.equal(cleared, 1);
+});
+
+test('r4: opt-in, reload, then import is refused (the durable "has announced" marker)', async () => {
+  const f = new IDBFactory();
+  const kv = new IdbKv('b', f);
+  await kv.put('secret/key', 'k');
+  assert.equal(importBlock(await kv.list(''), false, false), null, 'an empty profile may import');
+  let markerSeenAtCreate = false;
+  await announceHandoff(kv, () => { markerSeenAtCreate = true; return {}; }); // the marker is committed before the Handoff (the broadcast) is made
+  assert.equal(await kv.get(ANNOUNCED_KEY) !== null, true);
+  assert.ok(markerSeenAtCreate);
+  // "reload": a new page over the same store, with its page-local flags reset
+  const reloaded = new IdbKv('b', f);
+  assert.match(importBlock(await reloaded.list(''), false, false)!, /announced its key/);
+  // a failing marker write means nothing is announced
+  const broken = { put: async () => { throw new Error('no space'); } };
+  let created = false;
+  await assert.rejects(() => announceHandoff(broken, () => { created = true; }), /no space/);
+  assert.equal(created, false);
+});
+
+test('r4: opt-in during an import, and import during an opt-in, are refused by the one operation guard', async () => {
+  const g = new OperationGuard();
+  const order: string[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  assert.equal(g.tryEnter('import'), true);
+  const importing = gate.then(() => order.push('import done'));
+  assert.equal(g.tryEnter('handoff'), false, 'handoff cannot start while the import runs');
+  release();
+  await importing;
+  g.leave();
+  assert.equal(g.tryEnter('handoff'), true);
+  assert.equal(g.tryEnter('import'), false, 'import cannot start while the opt-in runs');
+  g.leave();
+  assert.equal(g.busy, null);
 });
