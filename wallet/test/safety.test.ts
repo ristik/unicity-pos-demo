@@ -5,25 +5,25 @@ import { test } from 'node:test';
 import { AmbiguousBroadcast } from '@unicitylabs/native-bridge-plugin/nb2';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 
-import { READ_ONLY_OK, VALUE_STEPS, refusal } from '../src/guard.js';
+import { READ_ONLY_OK, VALUE_STEPS, importBlock, refusal } from '../src/guard.js';
 import { Handoff, parseMessage } from '../src/handoff.js';
 import { hex } from '../src/hex.js';
 import { IdbKv } from '../src/idb.js';
 import { burnerFrom, replaceKeyDurable } from '../src/keys.js';
-import { sendFunding } from '../src/nb2.js';
+import { driveFunding, sendFunding } from '../src/nb2.js';
 import { checkRevision } from '../src/release.js';
-import { scanProfile } from '../src/work.js';
+import { legacyKeysOf } from '../src/work.js';
 
 (globalThis as { IDBKeyRange?: unknown }).IDBKeyRange = IDBKeyRange;
 
 test('#1 the page starts read-only: no mutation, import included, until it is ready', () => {
-  const start = { storeProblem: 'starting', ready: false, legacy: false };
+  const start = { storeProblem: 'starting', ready: false, legacy: false, keyDurable: false };
   for (const step of ['import', 'deposit', 'split', 'transfer', 'burn', 'redeem', 'fund', 'reset']) assert.ok(refusal(step, start), step);
   for (const step of READ_ONLY_OK) assert.equal(refusal(step, start), null);
-  assert.match(refusal('import', { storeProblem: null, ready: false, legacy: false })!, /not ready/);
-  assert.equal(refusal('import', { storeProblem: null, ready: true, legacy: false }), null);
-  assert.ok(refusal('import', { storeProblem: 'another page holds the journal', ready: true, legacy: false }));
-  assert.equal(refusal('reset', { storeProblem: 'older build', ready: false, legacy: true }), null);
+  assert.match(refusal('import', { storeProblem: null, ready: false, legacy: false, keyDurable: true })!, /not ready/);
+  assert.equal(refusal('import', { storeProblem: null, ready: true, legacy: false, keyDurable: true }), null);
+  assert.ok(refusal('import', { storeProblem: 'another page holds the journal', ready: true, legacy: false, keyDurable: true }));
+  assert.equal(refusal('reset', { storeProblem: 'older build', ready: false, legacy: true, keyDurable: true }), null);
 });
 
 test('#6 split and transfer go through the installation recheck', () => {
@@ -64,27 +64,33 @@ test('#2 announcements and tokens carry the deployment domain, and a peer of ano
   }
 });
 
-test('#4 the scan sees unfinished work in every scope and journal, and legacy records', async () => {
+test('import only into an empty profile with no handoff announced; otherwise a new profile', () => {
+  assert.equal(importBlock(['secret/key'], false, false), null);
+  assert.equal(importBlock([], false, false), null);
+  assert.match(importBlock(['secret/key', 'tok/s/d0'], false, false)!, /new profile/);
+  assert.match(importBlock(['secret/key', 'fund/pending/x'], false, false)!, /holds 1 record/);
+  assert.match(importBlock(['secret/key', 'recover/next'], false, false)!, /new profile/);
+  assert.match(importBlock(['secret/key', 'nb2/v1/x/intents'], false, false)!, /new profile/);
+  assert.match(importBlock(['secret/key'], false, true)!, /handoff/);
+  assert.match(importBlock(['secret/key'], true, false)!, /older build/);
+});
+
+test('the pre-release fund/pending key and unscoped token records are legacy', async () => {
   const kv = new IdbKv('a', new IDBFactory());
-  const rec = (id: string, extra: object): string => JSON.stringify({ id, amountWei: '1', phase: 'minted', ...extra });
-  await kv.put(`tok/${D1}.k/d0`, rec('d0', { burning: true }));
-  await kv.put(`tok/${D2}.k/d0`, rec('d0', {}));
-  await kv.put(`tok/${D2}.k/d1`, rec('d1', { phase: 'burned' }));
-  await kv.put('tok/d7', rec('d7', {}));
-  await kv.put(`nb2/v1/${D1}/return/x`, JSON.stringify({ kind: 'return', status: 'burn-requested' }));
-  await kv.put(`nb2/v1/${D1}/return/y`, JSON.stringify({ kind: 'return', status: 'paid' }));
-  await kv.put(`nb2/v1/${D2}/deposit/0`, JSON.stringify({ kind: 'deposit', status: 'submitted' }));
-  const scan = await scanProfile(kv);
-  assert.deepEqual(scan.legacy, ['tok/d7']);
-  assert.equal(scan.records.length, 3);
-  const text = scan.unfinished.join('\n');
-  assert.match(text, /burn of token d0 .* requested/);
-  assert.match(text, /d1 .* not redeemed/);
-  assert.match(text, /return is burn-requested/);
-  assert.match(text, /deposit 0 is submitted/);
-  assert.doesNotMatch(text, /paid/);
-  const empty = await scanProfile(new IdbKv('b', new IDBFactory()));
-  assert.deepEqual([empty.legacy, empty.unfinished], [[], []]);
+  assert.deepEqual(await legacyKeysOf(kv), []);
+  await kv.put(`tok/${D1}.k/d0`, '{}');
+  assert.deepEqual(await legacyKeysOf(kv), []);
+  await kv.put('fund/pending', '{}');
+  await kv.put('tok/d7', '{}');
+  assert.deepEqual((await legacyKeysOf(kv)).sort(), ['fund/pending', 'tok/d7']);
+});
+
+test('the faucet and the address need a durable key on the writer page', () => {
+  const g = { storeProblem: 'another page holds the journal', ready: false, legacy: false, keyDurable: false };
+  assert.match(refusal('faucet', g)!, /durable/);
+  assert.match(refusal('faucet-load', g)!, /durable/);
+  assert.equal(refusal('faucet', { ...g, storeProblem: null, keyDurable: true }), null);
+  assert.equal(refusal('faucet', { ...g, ready: true, storeProblem: null, keyDurable: true }), null);
 });
 
 test('#4 the key and its deployment-bound recovery request are one transaction', async () => {
@@ -122,4 +128,24 @@ test('#5 funding records are keyed by deployment and signer', () => {
   const k = (d: string, p: string): string => `fund/pending/${d}.${p}`;
   assert.notEqual(k(D1, key(1).slice(0, 16)), k(D2, key(1).slice(0, 16)));
   assert.notEqual(k(D1, key(1).slice(0, 16)), k(D1, key(2).slice(0, 16)));
+});
+
+test('#4 funding: the stored transaction survives every ambiguous outcome and is cleared only when its receipt is found', async () => {
+  const rec = { hash: `0x${'cd'.repeat(32)}`, raw: 'beef' };
+  let cleared = 0;
+  const clear = async () => void cleared++;
+  // "nonce too low" and the receipt endpoint still null: kept
+  const tooLow = { receipt: async () => null, sendRaw: async () => { throw new Error('nonce too low'); } };
+  await assert.rejects(() => driveFunding(tooLow, rec, clear), /nonce too low/);
+  // an ambiguous send and no receipt within the time: kept
+  const ambiguous = { receipt: async () => null, sendRaw: async () => { throw new AmbiguousBroadcast(new Uint8Array(32), 'partial'); } };
+  await assert.rejects(() => driveFunding(ambiguous, rec, clear, () => undefined, 20), /pending; retry or discard/);
+  // a plain RPC refusal: kept too (never deleted on an error)
+  await assert.rejects(() => driveFunding({ receipt: async () => null, sendRaw: async () => { throw new Error('insufficient funds'); } }, rec, clear), /insufficient/);
+  assert.equal(cleared, 0);
+  // the receipt is found: cleared once
+  let polls = 0;
+  const ok = { receipt: async () => (++polls > 2 ? { status: '0x1' } : null), sendRaw: async () => null };
+  assert.equal((await driveFunding(ok, rec, clear)).status, '0x1');
+  assert.equal(cleared, 1);
 });

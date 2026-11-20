@@ -349,6 +349,28 @@ export async function sendFunding(evm: { receipt(h: Uint8Array): Promise<unknown
   }
 }
 
+/**
+ * Send the stored funding transaction and wait for its receipt. The stored record is cleared (CLEAR) only once the receipt is found; any error,
+ * ambiguous send or timeout leaves it, for a retry or an explicit discard.
+ */
+export async function driveFunding(
+  evm: { receipt(h: Uint8Array): Promise<{ status?: string } | null>; sendRaw(raw: Uint8Array): Promise<unknown> }, rec: { hash: string; raw: string },
+  clear: () => Promise<void>, note: (m: string) => void = () => undefined, timeoutMs = 180_000,
+): Promise<{ status?: string }> {
+  note(await sendFunding(evm, rec));
+  const hash = unhex(rec.hash);
+  const end = Date.now() + timeoutMs;
+  for (;;) {
+    const rc = await evm.receipt(hash);
+    if (rc !== null) {
+      await clear();
+      return rc;
+    }
+    if (Date.now() > end) throw new Error('no receipt yet: the stored transaction is kept (pending; retry or discard)');
+    await sleep(Math.min(1500, timeoutMs));
+  }
+}
+
 // ---- the wallet's EVM account --------------------------------------------------------------------------------------------------------------
 
 export const balanceOf = (s: Session, address: string): Promise<bigint> => s.bridge.evm.balance(unhex(address));

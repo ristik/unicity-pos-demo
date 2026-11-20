@@ -19,8 +19,8 @@ import { acceptToken, Handoff, type Peer } from './handoff.js';
 import { fmtUnits, hex, parseUnits, sleep, unhex, waitFor } from './hex.js';
 import { acquireWriter, IdbKv } from './idb.js';
 import { CONFIRM_WORD, confirmed, valueAtRisk } from './importguard.js';
-import { scanProfile } from './work.js';
-import { READ_ONLY_OK, VALUE_STEPS, refusal } from './guard.js';
+import { legacyKeysOf } from './work.js';
+import { READ_ONLY_OK, VALUE_STEPS, importBlock, refusal } from './guard.js';
 import { burnerFrom, loadExisting, loadOrCreateDurable, parseBackup, replaceKeyDurable, toMnemonic, type Burner } from './keys.js';
 import * as nb2 from './nb2.js';
 import { checkRevision, fetchRelease, type Published } from './release.js';
@@ -51,6 +51,8 @@ let intentMark: string | null = null;
 let storeProblem: string | null = 'starting: the wallet is read-only until the writer lock and its durable key are ready';
 /** false until the lock, the key, the deployment's records, any recovery and the reconciliation are done: no value moves before */
 let ready = false;
+/** the key is committed to the durable store and this page is the profile's writer: only then is its address shown or funded */
+let keyDurable = false;
 const kv = new IdbKv(PROFILE);
 const traces = new Map<string, Trace>();
 const status = new Map<string, { ok: boolean; text: string }>();
@@ -93,7 +95,7 @@ async function step(key: string, fn: () => Promise<string | void>): Promise<void
   render();
   const t = begin();
   try {
-    const why = refusal(key, { storeProblem, ready, legacy: legacyKeys.length > 0 });
+    const why = refusal(key, { storeProblem, ready, legacy: legacyKeys.length > 0, keyDurable });
     if (why) throw new Error(why);
     if (VALUE_STEPS.has(key)) await nb2.checkInstallation(sess());
     const msg = await fn();
@@ -183,7 +185,6 @@ async function connect(): Promise<string> {
   // writer, durable key, records and reconciliation are settled: only now does this tab take part in a handoff, and only for this deployment
   if (!storeProblem && !legacyKeys.length) {
     ready = true;
-    handoff ??= new Handoff(PROFILE, hex(session.bridge.domain), me, handoffHandlers);
   }
   for (const t of listTokens()) if (t.phase === 'received') toVerify.add(t.id);
   await refreshBalances();
@@ -316,7 +317,7 @@ const STEPS: StepDef[] = [
   },
   {
     key: 'transfer', title: 'Transfer to another tab', phase: ['minted'], when: (t) => !t.burning, what: 'A certified transfer to the other tab\'s public key, then the token file goes over a BroadcastChannel. The wallet stores the exact request (with its random state mask) before it certifies it, so a retry certifies the same request. The receiver stores the file, then verifies it offline.',
-    input: () => h('span', {}, peerSelect, ' ', h('button', { class: 'link', onclick: () => window.open(`?w=${PROFILE === 'b' ? 'a' : 'b'}`, '_blank') }, `open tab ${PROFILE === 'b' ? 'A' : 'B'}`)),
+    input: () => h('span', {}, h('button', { class: 'link', disabled: !ready || !!handoff, onclick: enableHandoff }, handoff ? 'handoff on' : 'take part in handoff'), ' ', peerSelect, ' ', h('button', { class: 'link', onclick: () => window.open(`?w=${PROFILE === 'b' ? 'a' : 'b'}`, '_blank') }, `open tab ${PROFILE === 'b' ? 'A' : 'B'}`)),
     note: (t) => (t?.pending ? `A transfer built ${new Date(t.pending.at).toLocaleTimeString()} for tab ${t.pending.toProfile.toUpperCase()} is stored: Run certifies that same request, it never builds another.` : undefined),
     run: async () => {
       const t = currentOr('select a token');
@@ -438,6 +439,15 @@ const handoffHandlers: ConstructorParameters<typeof Handoff>[3] = {
 };
 /** Announced under the profile's key only once the writer lock and the key are settled (start). */
 let handoff: Handoff | undefined;
+/** true once this page has announced itself: key import is then refused until the page is reloaded */
+let handoffEver = false;
+/** Opt in: a tab announces its receiving key only when asked (and ready, and for this deployment), so an import can never race a sender that holds an announcement. */
+function enableHandoff(): void {
+  if (!ready || !session || handoff) return;
+  handoff = new Handoff(PROFILE, hex(session.bridge.domain), me, handoffHandlers);
+  handoffEver = true;
+  render();
+}
 
 /** Verify one received record: the plug-in and the owner check; then it is a held token ('minted'). A failure is kept on the record. */
 async function verifyOne(id: string): Promise<string> {
@@ -535,7 +545,7 @@ function card(title: string, ...body: (Node | string)[]): HTMLElement {
 
 function identityCard(): HTMLElement {
   const backup = h('div', { class: 'backup' });
-  const showBackup = () => backup.replaceChildren(
+  const showBackup = () => !keyDurable ? undefined : backup.replaceChildren(
     h('p', { class: 'warn' }, 'Burner key. Anyone with these words holds this wallet; test value only.'),
     h('p', {}, h('code', { class: 'words' }, toMnemonic(me.secret))),
     h('p', {}, copyable(`0x${hex(me.secret)}`)),
@@ -544,9 +554,11 @@ function identityCard(): HTMLElement {
   const markBox = h('input', { size: '6', inputmode: 'numeric', placeholder: '0', 'aria-label': 'deposit intent mark' });
   return card(`Identity · tab ${PROFILE.toUpperCase()}`,
     h('dl', { class: 'facts' },
-      h('dt', {}, 'EVM address'), h('dd', {}, copyable(me.evmAddress)),
-      h('dt', {}, 'Unicity public key'), h('dd', {}, copyable(hex(me.publicKey))),
-      h('dt', {}, 'owner predicate'), h('dd', {}, copyable(hex(me.predicate)), h('span', { class: 'muted' }, ` ${me.predicate.length} bytes CBOR`)),
+      ...(keyDurable ? [
+        h('dt', {}, 'EVM address'), h('dd', {}, copyable(me.evmAddress)),
+        h('dt', {}, 'Unicity public key'), h('dd', {}, copyable(hex(me.publicKey))),
+        h('dt', {}, 'owner predicate'), h('dd', {}, copyable(hex(me.predicate)), h('span', { class: 'muted' }, ` ${me.predicate.length} bytes CBOR`)),
+      ] : [h('dt', {}, 'key'), h('dd', { class: 'muted' }, 'no durable key yet: this page is not the profile\'s writer, so no address is shown')]),
       h('dt', {}, 'balance'), h('dd', {}, balance === null ? '—' : `${fmtUnits(balance)} UCT`),
       h('dt', {}, 'deposit intents'), h('dd', {}, intentMark ?? '0', h('span', { class: 'muted' }, ' next to use (backed up before any deposit is sent)')),
     ),
@@ -555,7 +567,7 @@ function identityCard(): HTMLElement {
       legacyKeys.length ? h('button', { onclick: () => void step('reset', async () => {
         const typed = prompt(`This profile holds records from an older build (${legacyKeys.length}). Resetting deletes them and the journals of this profile, and keeps the key (export it first).\n\nType "reset" to continue.`);
         if ((typed ?? '').trim().toLowerCase() !== 'reset') throw new Error('not reset');
-        await kv.rewrite(['tok/', 'nb2/', 'fund/', 'recover/', 'backup/'], []);
+        await kv.rewrite(['tok/', 'nb2/', 'fund/', 'recover/', 'backup/'], []); // also the pre-release `fund/pending`
         remove('fund.pending');
         remove('intents.backup');
         location.reload();
@@ -567,13 +579,12 @@ function identityCard(): HTMLElement {
           const secret = parseBackup(importBox.value);
           const mark = markBox.value.trim();
           if (mark && !/^\d{1,9}$/.test(mark)) throw new Error('the intent mark is the number shown next to the exported key');
-          // every deployment's records and every journal of the profile, not only the active scope's
-          const scan = await scanProfile(kv);
-          const blocking = [...scan.unfinished, ...(session ? [] : ['the bridge is not connected, so the profile cannot be inspected for a recovery request'])];
-          if (blocking.length || scan.legacy.length || legacyKeys.length) {
+          // Import only into an EMPTY profile that has announced nothing: nothing of value can be stranded, and no sender can hold an announcement of the key being retired.
+          // Otherwise open a new profile (?w=...).
+          const block = importBlock(await kv.list(''), legacyKeys.length > 0, !!handoff || handoffEver);
+          if (block) {
             showBackup();
-            alert(`This tab's key cannot be replaced while work signed by it is unfinished:\n\n- ${[...blocking, ...(scan.legacy.length || legacyKeys.length ? ['records of an older build are present: reset the profile first'] : [])].join('\n- ')}\n\nFinish it first. Export the current key (shown below) before you replace it.`);
-            throw new Error('not replaced: unfinished work in this profile');
+            throw new Error(block);
           }
           let held: bigint | null = null;
           try {
@@ -581,10 +592,10 @@ function identityCard(): HTMLElement {
           } catch {
             held = null;
           }
-          const atRisk = valueAtRisk({ address: me.evmAddress, balance: held, tokens: scan.records });
+          const atRisk = valueAtRisk({ address: me.evmAddress, balance: held, tokens: [] });
           if (atRisk.length) {
             showBackup();
-            const typed = prompt(`The current key still has:\n\n- ${atRisk.join('\n- ')}\n\nReplacing it deletes the only stored copy of its secret, and this profile's journals and token records (they belong to it). `
+            const typed = prompt(`The current key still has:\n\n- ${atRisk.join('\n- ')}\n\nReplacing it deletes the only stored copy of its secret. `
               + `Save the current key and the intent mark first (shown on the page under Identity).\n\nType "${CONFIRM_WORD}" to replace it anyway.`);
             if (!confirmed(typed)) throw new Error('not replaced: the current key is kept');
           }
@@ -610,7 +621,7 @@ function fundPeer(): HTMLElement | string {
   const p = [...peers.values()][0];
   const pending = fundPending;
   if ((!p && !pending) || !session) return '';
-  return h('button', {
+  return h('span', {}, h('button', {
     class: 'link', disabled: !!busy, onclick: () => void step('fund', async () => {
       const s = sess();
       let rec = fundPending;
@@ -630,24 +641,21 @@ function fundPeer(): HTMLElement | string {
         fundPending = rec;
         fact('tx', rec.hash);
       }
-      try {
-        fact('broadcast', await nb2.sendFunding(s.bridge.evm, rec));
-      } catch (e) {
-        // a plain refusal of a tx the chain has not seen: nothing was sent
-        if (e instanceof RpcError && !(await s.bridge.evm.receipt(unhex(rec.hash)))) {
-          await kv.delete(fundKey);
-          fundPending = null;
-        }
-        throw e;
-      }
-      const hash = unhex(rec.hash);
-      const rc = await waitFor(`the receipt of ${rec.hash}`, 180_000, async () => (await s.bridge.evm.receipt(hash)) ?? undefined, 1500);
-      await kv.delete(fundKey);
-      fundPending = null;
+      // the stored transaction is kept through any error or ambiguous outcome; it is cleared only when its receipt is found
+      const rc = await nb2.driveFunding(s.bridge.evm, rec, async () => {
+        await kv.delete(fundKey);
+        fundPending = null;
+      }, (m) => fact('broadcast', m));
       await refreshBalances();
       return `${rc.status === '0x1' ? 'sent' : 'reverted:'} 0.001 UCT to tab ${to.toUpperCase()}`;
     }),
-  }, pending ? `check the pending gas transfer to tab ${pending.to.toUpperCase()}` : `send 0.001 UCT gas to tab ${p!.profile.toUpperCase()}`);
+  }, pending ? `pending gas transfer to tab ${pending.to.toUpperCase()}: retry` : `send 0.001 UCT gas to tab ${p!.profile.toUpperCase()}`),
+  pending ? h('button', { class: 'link', disabled: !!busy, onclick: () => void step('fund-discard', async () => {
+    if (!confirm('Discard the stored gas transfer? If it was sent and is still in flight or was mined, sending a new one pays tab B TWICE. Discard only when you are sure the transaction is gone (not in the chain, nonce reused).')) throw new Error('not discarded');
+    await kv.delete(fundKey);
+    fundPending = null;
+    return 'discarded the stored gas transfer';
+  }) }, 'discard') : '');
 }
 
 /** Built once: re-attaching the hCaptcha iframe would reload it. Only its controls are re-rendered. */
@@ -660,8 +668,8 @@ function renderFaucet(): void {
   const load = status.get('faucet-load');
   faucetControls.replaceChildren(
     h('div', { class: 'row' },
-      h('button', { disabled: !!busy, onclick: () => void step('faucet-load', loadCaptcha) }, captcha ? 'reload captcha' : 'show captcha'),
-      h('button', { disabled: !!busy || !captcha, onclick: () => void step('faucet', claimFaucet) }, 'Claim UCT'),
+      h('button', { disabled: !!busy || !keyDurable, onclick: () => void step('faucet-load', loadCaptcha) }, captcha ? 'reload captcha' : 'show captcha'),
+      h('button', { disabled: !!busy || !captcha || !keyDurable, onclick: () => void step('faucet', claimFaucet) }, 'Claim UCT'),
       st ? h('span', { class: st.ok ? 'msg' : 'msg bad' }, st.text) : '',
       load && !load.ok ? h('span', { class: 'msg bad' }, load.text) : ''),
     drawer('faucet'));
@@ -784,7 +792,7 @@ function header(): HTMLElement {
   return h('header', {},
     h('h1', {}, 'Unicity demo wallet'),
     h('span', { class: 'muted' }, session ? `chain ${session.bridge.cfg.chainId} · trust epoch ${trust?.history.tip?.epoch}` : trust ? `trust epoch ${trust.history.tip?.epoch} · no bridge` : 'not connected'),
-    h('button', { class: 'link', disabled: !!busy, onclick: () => void step('connect', connect) }, 'reconnect'),
+    h('button', { class: 'link', disabled: !!busy, onclick: () => location.reload() }, 'reconnect (reloads the page)'),
     st && !st.ok ? h('span', { class: 'msg bad' }, st.text) : '',
     h('details', { class: 'inline' }, h('summary', {}, 'explain'), explain(traces.get('connect'))),
     h('a', { href: './pos.html' }, 'PoS visualizer'),
@@ -820,8 +828,8 @@ async function start(): Promise<void> {
     if (!w.ok) storeProblem = w.problem;
     else {
       me = (await loadOrCreateDurable(kv)).burner;
-      const scan = await scanProfile(kv);
-      legacyKeys = [...scan.legacy, ...(load('fund.pending') ? ['localStorage fund.pending'] : [])];
+      keyDurable = true;
+      legacyKeys = [...(await legacyKeysOf(kv)), ...(load('fund.pending') ? ['localStorage fund.pending'] : [])];
       // the wallet is read-only until connect has also opened the deployment's records and finished any recovery
       storeProblem = legacyKeys.length ? 'This profile was written by an older build of the wallet (its records have no deployment scope, which this build needs). It is not read. Export your key, then reset the profile below to continue.' : null;
     }

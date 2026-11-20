@@ -13,6 +13,7 @@
 //   deployment         print the bridge deployment card      flow        print the asset-flow card
 //   size[:<height>] | dark   laptop viewport (default height 1500) | dark color scheme   shot:<file> PNG screenshot
 //   wait:<seconds>     sleep                                 dump        print the page text
+//   handoff            switch this tab's handoff on (a tab announces itself only when asked)
 //   reload             reload the page (the journal and token records are in IndexedDB: a step resumes after it)
 //
 // Tab `pos` opens the PoS visualizer (<base>pos.html), where `dump`, `shot:<file>` and `text:<css selector>` apply.
@@ -134,6 +135,10 @@ for (const c of cmds) {
       await t.ev(`(() => { const el = document.querySelector('[data-step=${k}] input'); el.value = ${JSON.stringify(v)}; el.dispatchEvent(new Event('input', { bubbles: true })); })()`);
       break;
     }
+    case 'handoff':
+      await clickText(t, 'take part in handoff');
+      await sleep(1000);
+      break;
     case 'deployment':
       console.log(p, 'deployment:', await t.ev(text(card('Bridge deployment'))));
       break;
