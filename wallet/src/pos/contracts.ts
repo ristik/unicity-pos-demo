@@ -158,6 +158,8 @@ export const POA_STATE = ['None', 'Applied', 'Admitted', 'Joining', 'Active', 'E
 export const POA_ACTION = ['', 'Admit', 'Remove', 'ConfirmExit'];
 /** PoaElection.TAG = keccak256("unicity.vr.poa.v1"): what the active module's moduleTag is under PoA. */
 export const POA_TAG = '0xbcaea3db6891e775ad29d518c8f60e5bd039e96222333877246cf89d5c77e3bd';
+/** PosElectionAdapter.TAG = keccak256("unicity.vr.pos-p85.v1") (contracts src/vr/pos/PosElectionAdapter.sol): the PoS module's moduleTag. */
+export const POS_TAG = '0xe6038c43e0e748df49e115a4d4eca9c44fc4da319ac4a33459ca9f2e67c18dd0';
 /** VR's MIN_EPOCH_GAP: the progress that must pass since an epoch's first ordinary round before the next election is due (VRConstants.sol). */
 export const MIN_EPOCH_GAP = 100n;
 export const VR_ADDRESS = '0xff00000000000000000000000000000000000003';

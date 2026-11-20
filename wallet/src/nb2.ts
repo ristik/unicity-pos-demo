@@ -13,6 +13,7 @@
  * `burn` runs it again); a transfer's request persisted before it is certified.
  */
 import { sha256 } from '@noble/hashes/sha2.js';
+import { keccak_256 } from '@noble/hashes/sha3.js';
 import {
   HttpJsonRpc, LocalKeySigner, NativeBridgeV2, Nb2Error, WalletError, appendTransfer, certifyChecked, decodeRevert, deriveBridgeKey, evidenceOf,
   freshMask, localOwner, transferRequest,
@@ -87,6 +88,8 @@ export interface Session {
   owner: OwnerSigner;
   pub: Uint8Array;
   aggregator: Aggregator;
+  /** the backup callback the session was opened with (a recovered, unbacked-up intent finishes it) */
+  backup: (intents: IntentsRecord) => Promise<void>;
 }
 
 export interface OpenArgs {
@@ -119,7 +122,35 @@ export async function openSession(a: OpenArgs): Promise<Session> {
     bridgeKey: deriveBridgeKey(tagged('unicity-demo/nb2/seed/', a.me.secret)),
     backup: a.backup, refreshTrust: a.refreshTrust, receiptTimeoutMs: a.rpc ? 0 : 180_000, pollMs: a.rpc ? 0 : 1_000, ...(a.gas ? { gas: a.gas } : {}),
   });
-  return { bridge, trust: a.trust, published: a.published, pins: a.published.pins, signer: new LocalKeySigner(a.me.secret), owner: localOwner(a.me.secret), pub: a.me.publicKey, aggregator };
+  return { bridge, trust: a.trust, published: a.published, pins: a.published.pins, signer: new LocalKeySigner(a.me.secret), owner: localOwner(a.me.secret), pub: a.me.publicKey, aggregator, backup: a.backup };
+}
+
+/**
+ * The installation check again, against the session's pinned deployment: the RPC's chain ID, the vault's `config()` equal to the pinned Γ, and
+ * its runtime code hash. The reference wallet runs it before every value-moving command; a network that was reset behind an open page (same
+ * chain ID and vault address, another vault) must not receive a deposit made under the old domain. Throws `BadDeployment`; nothing is sent.
+ */
+export async function checkInstallation(s: Session): Promise<void> {
+  const evm = s.bridge.evm;
+  const bad = (what: string): never => { throw new WalletError('BadDeployment', `${what}: the manifest and the node are not the same deployment (reload the page after a reset)`); };
+  if ((await evm.chainId()) !== s.bridge.cfg.chainId) bad('the RPC serves another chain');
+  if (!eqBytes(await evm.vaultConfig(s.bridge.cfg.vault), s.pins.gamma)) bad('the vault\'s config() is not the pinned Γ');
+  if (!eqBytes(keccak_256(await evm.code(s.bridge.cfg.vault)), s.pins.vaultRuntimeCodeHash)) bad('the vault\'s runtime code is not the pinned one');
+}
+
+/**
+ * A planned deposit whose backup was interrupted (the plug-in writes the plan, calls the backup, then commits `backedUp`): finish it before
+ * the send, which refuses an unbacked-up intent.
+ */
+export async function finishBackup(s: Session, intent: bigint): Promise<boolean> {
+  const rec = await s.bridge.journal.deposit(intent);
+  if (!rec || rec.backedUp) return false;
+  const intents = await s.bridge.journal.intents();
+  if (!intents) throw new WalletError('JournalNotPersisted', 'no intent counter in the journal');
+  await s.backup(intents);
+  await s.bridge.markBackedUp(intent);
+  fact('backup', `finished the interrupted backup of intent ${intent} (high-water mark ${intents.next})`);
+  return true;
 }
 
 // ---- refusals and retries -----------------------------------------------------------------------------------------------------------------
@@ -190,6 +221,13 @@ export async function mint(s: Session, intent: bigint, note?: (reason: string) =
   fact('token id', `0x${hex(v.tokenId)}`);
   fact('token file', `${token.length} bytes`);
   return { token, tokenId: v.tokenId, amount: v.amount, depositNumber: p.depositNumber, jBytes: p.reason.length };
+}
+
+/** The two whole parts of a split that returns BACK of a token of TOTAL: [the rest, the part to return]. Zero and the whole token are refused before anything is persisted. */
+export function splitAmounts(total: bigint, back: bigint): bigint[] {
+  if (back <= 0n) throw new Error('the part to return must be more than zero');
+  if (back >= total) throw new Error(`the part to return (${back}) must be smaller than the token (${total})`);
+  return [total - back, back];
 }
 
 /** Split a held token into whole parts, all to this wallet's key (the plug-in journals the split: a rerun with the same parts resumes). */

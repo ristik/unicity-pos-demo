@@ -30,21 +30,24 @@ async function world() {
   const me = burnerFrom(secret);
   w.chain.fund(new LocalKeySigner(secret).address, 10n ** 24n);
   const intents: string[] = [];
-  const open = async (kv = new IdbKv('a', factory)) => {
+  const open = async (kv = new IdbKv('a', factory), backup: (i: { next: string }) => Promise<void> = async (i) => void intents.push(i.next)) => {
     const s = await nb2.openSession({
       settings: DEFAULTS, me, trust: w.root.trust, journal: kv, rpc: w.chain, aggregator: w.agg, gas: WORLD_GAS,
       published: { release: { pins: {} }, pins: w.pins, bundle: w.root.bundle, publishedPin: '', pluginCommit: null, url: '' },
-      backup: async (i) => void intents.push(i.next), refreshTrust: async () => undefined,
+      backup, refreshTrust: async () => undefined,
     });
     return { s, kv };
   };
   return { ...w, factory, me, intents, open };
 }
+async function openWith(w: Awaited<ReturnType<typeof world>>, backup: (i: { next: string }) => Promise<void>) {
+  return (await w.open(new IdbKv('a', w.factory), backup)).s;
+}
 
 test('deposit, mint, split, a transfer finished after a crash, return and redeem', async () => {
   const w = await world();
   const { s, kv } = await w.open();
-  await initTokens(kv);
+  await initTokens(kv, 'D.k');
 
   // deposit: the intent mark is backed up before the value is sent
   const plan = await nb2.planDeposit(s, 100n);
@@ -67,7 +70,7 @@ test('deposit, mint, split, a transfer finished after a crash, return and redeem
   await putToken({ id: 'k', amountWei: '60', phase: 'minted', bytes: hex(keep) });
   await patchToken('k', { pending: { ...prepared, at: 0, toPublicKey: hex(bob.publicKey), toProfile: 'b', signer: hex(w.me.publicKey) } });
   const reopened = await w.open(new IdbKv('a', w.factory)); // a fresh page over the same durable store
-  await initTokens(reopened.kv);
+  await initTokens(reopened.kv, 'D.k');
   const stored = getToken('k')!;
   assert.ok(stored.pending, 'the exact request survived');
   const sent = await nb2.finishTransfer(reopened.s, unhex(stored.bytes!), stored.pending!);
@@ -109,6 +112,39 @@ test('the installation check refuses another deployment, and nothing is sent', a
     settings: DEFAULTS, me: w.me, trust: w.root.trust, journal: new IdbKv('a', w.factory), rpc: w.chain, aggregator: w.agg, gas: WORLD_GAS,
     published: { release: { pins: {} }, pins: bad, bundle: w.root.bundle, publishedPin: '', pluginCommit: null, url: '' }, backup: async () => undefined, refreshTrust: async () => undefined,
   }), (e: unknown) => e instanceof Error && /BadDeployment/.test(e.message));
+});
+
+test('the installation is checked again before value moves: a reset network or another vault is refused', async () => {
+  const w = await world();
+  const { s } = await w.open();
+  await nb2.checkInstallation(s);
+  const badCode = { ...s, pins: { ...s.pins, vaultRuntimeCodeHash: Uint8Array.from(s.pins.vaultRuntimeCodeHash, (x, i) => (i === 0 ? x ^ 1 : x)) } };
+  await assert.rejects(() => nb2.checkInstallation(badCode), /BadDeployment/);
+  const badGamma = { ...s, pins: { ...s.pins, gamma: Uint8Array.from(s.pins.gamma, (x, i) => (i === s.pins.gamma.length - 1 ? x ^ 1 : x)) } };
+  await assert.rejects(() => nb2.checkInstallation(badGamma), /BadDeployment/);
+});
+
+test('an interrupted intent backup is finished before the send, which refuses an unbacked-up intent', async () => {
+  const w = await world();
+  const { s } = await w.open();
+  let fail = true;
+  const flaky = { ...s, backup: async (i: { next: string }) => { if (fail) throw new Error('the backup was interrupted'); w.intents.push(i.next); } };
+  const plan = await nb2.planDeposit(await openWith(w, flaky.backup), 100n).catch(() => null);
+  assert.equal(plan, null, 'the plan call failed at the backup');
+  const rec = await s.bridge.journal.deposit(0n);
+  assert.equal(rec?.backedUp, false, 'the plug-in left a planned, unbacked-up deposit');
+  await assert.rejects(() => nb2.sendDeposit(s, 0n), /JournalNotPersisted|backed up|backup/i);
+  fail = false;
+  assert.equal(await nb2.finishBackup(flaky, 0n), true);
+  assert.equal((await s.bridge.journal.deposit(0n))?.backedUp, true);
+  assert.equal((await nb2.sendDeposit(s, 0n)).depositNumber, 1n);
+  assert.equal(await nb2.finishBackup(flaky, 0n), false, 'nothing left to finish');
+});
+
+test('split amounts: zero and the whole token are refused before anything is persisted', () => {
+  assert.deepEqual(nb2.splitAmounts(100n, 40n), [60n, 40n]);
+  assert.throws(() => nb2.splitAmounts(100n, 0n), /more than zero/);
+  assert.throws(() => nb2.splitAmounts(100n, 100n), /smaller/);
 });
 
 test('the old-epoch check and the forgeries', async () => {

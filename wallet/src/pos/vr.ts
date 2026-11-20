@@ -7,7 +7,7 @@
  */
 import { decode } from './abi.js';
 import { big, isZero, num, obj, arr, str, type CallRecord, type Chain } from './chain.js';
-import { CHANGE_KIND, CHANGE_PAYLOAD, CHANGE_STATE, MIN_EPOCH_GAP, POA_ACTION, POA_TAG, type FnName } from './contracts.js';
+import { CHANGE_KIND, CHANGE_PAYLOAD, CHANGE_STATE, MIN_EPOCH_GAP, POA_ACTION, POA_TAG, POS_TAG, type FnName } from './contracts.js';
 import type { Value } from './abi.js';
 
 type Log = CallRecord[];
@@ -16,7 +16,7 @@ const isZeroAddress = (a: string): boolean => a.toLowerCase() === ZERO_ADDRESS;
 
 /**
  * - `poa`: the active module is PoaElection (its moduleTag is keccak256("unicity.vr.poa.v1")): the intermediate mode before PoS
- * - `pos`: the module is not PoA and names a liability holder (custody): the PosElectionAdapter over P85
+ * - `pos`: the module's tag is the PosElectionAdapter's (keccak256("unicity.vr.pos-p85.v1")): the P85 stack, custody being its liability holder
  * - `other`: some other module; `none`: no VR at the address (a network that predates it)
  */
 export type Mode = 'poa' | 'pos' | 'other' | 'none';
@@ -171,10 +171,11 @@ export function moduleOf(v: Value): ModuleInfo {
   };
 }
 
-/** Which module is active: PoA by its tag, PoS when another module names a liability holder (custody), else other. */
+/** Which module is active, by its published tag: PoA (PoaElection) or PoS (PosElectionAdapter); any other module is  and its holder is never queried as custody. */
 export function modeOf(m: ModuleInfo): Mode {
-  if (m.tag.toLowerCase() === POA_TAG) return 'poa';
-  if (!isZeroAddress(m.liabilityHolder)) return 'pos';
+  const t = m.tag.toLowerCase();
+  if (t === POA_TAG) return 'poa';
+  if (t === POS_TAG) return 'pos';
   return 'other';
 }
 

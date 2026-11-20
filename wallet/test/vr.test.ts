@@ -12,7 +12,7 @@ import { keccak_256 } from '@noble/hashes/sha3.js';
 
 import { parseParam, parseTuple, parseSignature, selectorOf, type AbiType } from '../src/pos/abi.js';
 import { Chain, type Addresses } from '../src/pos/chain.js';
-import { CHANGE_PAYLOAD, FN, POA_TAG, type FnName } from '../src/pos/contracts.js';
+import { CHANGE_PAYLOAD, FN, POA_TAG, POS_TAG, type FnName } from '../src/pos/contracts.js';
 import { boundaryOf, describeChange, modeOf, partitionOf, poaAction, readVr, readVrPointers, type VrModel } from '../src/pos/vr.js';
 import { hex, unhex } from '../src/hex.js';
 
@@ -84,6 +84,8 @@ interface Scenario {
   mode: 'poa' | 'pos';
   /** custody's rootKeyHash of id 2, to make a mismatch */
   custodyRk2?: string;
+  /** a module tag other than the mode's */
+  tag?: string;
 }
 
 function fixture(sc: Scenario) {
@@ -99,7 +101,7 @@ function fixture(sc: Scenario) {
     vrRecordCursor: () => 12n, vrHealth: () => 0, vrOpenOutput: () => H(0xb0), vrLastAcked: () => H(0xa0),
     vrActiveModule: () => ({
       module: poa ? PoA : ADAPTER, codeHash: H(0xc0de),
-      meta: { moduleTag: poa ? POA_TAG : H(0x9051), capabilities: 0, maxElectionInterval: 1000, gasBounds: [1, 2, 3, 4, 5, 6, 7, 8], liabilityHolder: poa ? ADDR(0) : CUSTODY, liabilityHolderCodeHash: H(0) },
+      meta: { moduleTag: sc.tag ?? (poa ? POA_TAG : POS_TAG), capabilities: 0, maxElectionInterval: 1000, gasBounds: [1, 2, 3, 4, 5, 6, 7, 8], liabilityHolder: poa ? ADDR(0) : CUSTODY, liabilityHolderCodeHash: H(0) },
       health: 0, workPending: true, workSince: 1250, stallDeadline: 40_000,
     }),
     vrConfig: () => ({
@@ -231,6 +233,18 @@ test('a custody position that disagrees with VR is reported', async () => {
   const m = (await readVr(chain, logs()))!;
   assert.equal(m.custody?.allEqual, false);
   assert.deepEqual(m.custody?.rows.map((r) => r.equal), [true, false, true]);
+});
+
+test('a module with a liability holder but another tag is not labelled PoS, and its holder is not queried as custody', async () => {
+  const { chain, logs, calls } = fixture({ mode: 'pos', tag: H(0x9051) });
+  const m = (await readVr(chain, logs()))!;
+  assert.equal(m.mode, 'other');
+  assert.equal(m.custody, undefined);
+  assert.ok(!calls.some((c) => c.startsWith('custodyElection')));
+});
+
+test('POS_TAG is keccak256("unicity.vr.pos-p85.v1")', () => {
+  assert.equal(`0x${hex(keccak_256(new TextEncoder().encode('unicity.vr.pos-p85.v1')))}`, POS_TAG);
 });
 
 test('a network without VR reads as null (the P85-only page)', async () => {

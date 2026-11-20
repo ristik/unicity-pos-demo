@@ -67,27 +67,43 @@ export interface TokenRecord {
 
 const records = new Map<string, TokenRecord>();
 let kv: IdbKv | null = null;
-const KEY = (id: string): string => `tok/${id}`;
+let scope = '';
+const KEY = (id: string): string => `tok/${scope}/${id}`;
 
-/** Load the stored records (once, at start). */
-export async function initTokens(store: IdbKv): Promise<void> {
+/**
+ * Open the records of one deployment and key: `scope` names the deployment domain and the owner key (the plug-in's own journal is keyed by
+ * the domain, and a record here is only meaningful under the secret that signed it), so another deployment or another key never meets,
+ * overwrites or resumes these. Called once the bridge is open.
+ */
+export async function initTokens(store: IdbKv, scopeName: string): Promise<void> {
   kv = store;
+  scope = scopeName;
   records.clear();
-  for (const [, v] of await store.entries('tok/')) {
+  for (const [, v] of await store.entries(`tok/${scope}/`)) {
     const t = JSON.parse(v) as TokenRecord;
     records.set(t.id, t);
   }
 }
 
+export const tokensOpen = (): boolean => kv !== null;
 export const listTokens = (): TokenRecord[] => [...records.values()].sort((a, b) => a.id.localeCompare(b.id, 'en', { numeric: true }));
 export const getToken = (id: string | null | undefined): TokenRecord | undefined => (id ? records.get(id) : undefined);
 
-/** Write a record durably. The copy in memory changes first, so a reader after this call sees it even while the write is in flight. */
-export async function putToken(t: TokenRecord): Promise<void> {
-  records.set(t.id, t);
+/**
+ * Write records durably, all in one transaction, then read them back: the copy in memory changes only after the commit, so a failed write leaves
+ * memory and the store the same, and a caller that goes on (certifies a transfer) acts on what is really stored.
+ */
+export async function putTokens(ts: TokenRecord[]): Promise<void> {
   if (!kv) throw new Error('the token store is not open');
-  await kv.put(KEY(t.id), JSON.stringify(t));
+  const texts = ts.map((t) => JSON.stringify(t));
+  await kv.putMany(ts.map((t, i): [string, string] => [KEY(t.id), texts[i]]));
+  for (let i = 0; i < ts.length; i++) {
+    if ((await kv.get(KEY(ts[i].id))) !== texts[i]) throw new Error(`token record ${ts[i].id} did not read back as written`);
+  }
+  for (const t of ts) records.set(t.id, t);
 }
+
+export const putToken = (t: TokenRecord): Promise<void> => putTokens([t]);
 
 /** Merge fields into a stored record (by id, never "the selected one": the selection may change while a step runs). undefined removes a field. */
 export async function patchToken(id: string, patch: Partial<TokenRecord>): Promise<TokenRecord> {

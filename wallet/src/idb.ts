@@ -76,6 +76,14 @@ export class IdbKv {
     await done(tx);
   }
 
+  /** Several writes in ONE durable transaction: all of them are committed, or none is. */
+  async putMany(entries: [string, string][]): Promise<void> {
+    const db = await this.open();
+    const tx = db.transaction(STORE, 'readwrite', { durability: 'strict' });
+    for (const [k, v] of entries) tx.objectStore(STORE).put(v, this.k(k));
+    await done(tx);
+  }
+
   async delete(key: string): Promise<void> {
     const db = await this.open();
     const tx = db.transaction(STORE, 'readwrite', { durability: 'strict' });
@@ -120,19 +128,20 @@ export class IdbKv {
 }
 
 /**
- * One writer per profile: a Web Lock held until the page goes away. Returns null when another page of this profile holds it (this one must
- * not write). Where Web Locks do not exist the page is let through, and says so (`exclusive: false`).
+ * One writer per profile: a Web Lock held until the page goes away. Returns `{ problem }` when another page of this profile holds it, or when
+ * the browser has no Web Locks (or no secure context): the wallet fails closed and moves no value, since it could not tell a second writer
+ * from itself.
  */
-export async function acquireWriter(profile: string): Promise<{ exclusive: boolean } | null> {
+export async function acquireWriter(profile: string): Promise<{ ok: true } | { ok: false; problem: string }> {
   const locks = (globalThis.navigator as Navigator | undefined)?.locks;
-  if (!locks) return { exclusive: false };
+  if (!locks) return { ok: false, problem: 'this browser context has no Web Locks (an insecure origin, or an old browser): the wallet cannot guarantee one writer per profile, so it will not move value. Serve it over https or from localhost' };
   return new Promise((resolve) => {
     void locks.request(`unicity-demo-writer:${profile}`, { ifAvailable: true }, (lock) => {
       if (!lock) {
-        resolve(null);
+        resolve({ ok: false, problem: `another page of profile ${profile.toUpperCase()} holds this wallet's journal (one writer per profile): close it, or use another profile (?w=)` });
         return undefined;
       }
-      resolve({ exclusive: true });
+      resolve({ ok: true });
       return new Promise<void>(() => undefined); // held for the life of the page
     });
   });
