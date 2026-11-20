@@ -69,3 +69,9 @@ export async function fetchRelease(url: string): Promise<Published> {
 }
 
 export const pinHex = (b: Uint8Array): string => hex(b);
+
+/** The deployment's plug-in revision against the one this build bundles: both must be known and equal, else the bridge stays closed. */
+export function checkRevision(manifest: string | null, build: string | null): void {
+  if (!manifest || !build) throw new Error(`the plug-in revision cannot be compared (manifest: ${manifest ?? 'none'}, this build: ${build ?? 'none'}): the bridge stays closed`);
+  if (manifest !== build) throw new Error(`the manifest was released with native-bridge-plugins ${manifest}, this build bundles ${build}: the bridge stays closed (rebuild the wallet against the manifest's revision)`);
+}

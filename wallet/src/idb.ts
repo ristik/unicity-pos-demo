@@ -84,6 +84,22 @@ export class IdbKv {
     await done(tx);
   }
 
+  /**
+   * ONE transaction: delete every key under each of PREFIXES ('' is the whole profile), then write ENTRIES. A key replacement and its recovery
+   * request, or a profile reset, are committed together or not at all.
+   */
+  async rewrite(prefixes: string[], entries: [string, string][]): Promise<void> {
+    const db = await this.open();
+    const tx = db.transaction(STORE, 'readwrite', { durability: 'strict' });
+    const st = tx.objectStore(STORE);
+    for (const pre of prefixes) {
+      const lo = this.k(pre);
+      st.delete(IDBKeyRange.bound(lo, `${lo}\uffff`));
+    }
+    for (const [k, v] of entries) st.put(v, this.k(k));
+    await done(tx);
+  }
+
   async delete(key: string): Promise<void> {
     const db = await this.open();
     const tx = db.transaction(STORE, 'readwrite', { durability: 'strict' });

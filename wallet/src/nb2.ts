@@ -15,7 +15,7 @@
 import { sha256 } from '@noble/hashes/sha2.js';
 import { keccak_256 } from '@noble/hashes/sha3.js';
 import {
-  HttpJsonRpc, LocalKeySigner, NativeBridgeV2, Nb2Error, WalletError, appendTransfer, certifyChecked, decodeRevert, deriveBridgeKey, evidenceOf,
+  AmbiguousBroadcast, HttpJsonRpc, LocalKeySigner, NativeBridgeV2, Nb2Error, WalletError, appendTransfer, certifyChecked, decodeRevert, deriveBridgeKey, evidenceOf,
   freshMask, localOwner, transferRequest,
   type Aggregator, type DepositPlan, type DeploymentPins, type GasModel, type IntentsRecord, type JournalStore, type JsonRpc, type OwnerSigner, type ReconcileResult,
   type ReturnPlan, type ReturnRecord,
@@ -331,6 +331,23 @@ export async function redeem(s: Session, returnId: Uint8Array, note: (m: string)
 
 /** The journal record of a return, or null. */
 export const returnRecord = (s: Session, returnId: string): Promise<ReturnRecord | null> => s.bridge.journal.ret(returnId);
+
+/**
+ * Broadcast the stored, exact funding transaction, once: a mined one (its receipt is present) is never rebroadcast, "nonce too low" with its
+ * receipt present is the same thing, an ambiguous 503 or an "already known" leaves the receipt to decide.
+ */
+export async function sendFunding(evm: { receipt(h: Uint8Array): Promise<unknown | null>; sendRaw(raw: Uint8Array): Promise<unknown> }, rec: { hash: string; raw: string }): Promise<'already mined' | 'sent' | 'pending: the receipt decides'> {
+  const hash = unhex(rec.hash);
+  if ((await evm.receipt(hash)) !== null) return 'already mined';
+  try {
+    await evm.sendRaw(unhex(rec.raw));
+    return 'sent';
+  } catch (e) {
+    if (/nonce too low/i.test(String(e)) && (await evm.receipt(hash)) !== null) return 'already mined';
+    if (e instanceof AmbiguousBroadcast || /already known|known transaction|already imported|already exists/i.test(String(e))) return 'pending: the receipt decides';
+    throw e;
+  }
+}
 
 // ---- the wallet's EVM account --------------------------------------------------------------------------------------------------------------
 

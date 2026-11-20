@@ -19,9 +19,11 @@ import { acceptToken, Handoff, type Peer } from './handoff.js';
 import { fmtUnits, hex, parseUnits, sleep, unhex, waitFor } from './hex.js';
 import { acquireWriter, IdbKv } from './idb.js';
 import { CONFIRM_WORD, confirmed, valueAtRisk } from './importguard.js';
+import { scanProfile } from './work.js';
+import { READ_ONLY_OK, VALUE_STEPS, refusal } from './guard.js';
 import { burnerFrom, loadExisting, loadOrCreateDurable, parseBackup, replaceKeyDurable, toMnemonic, type Burner } from './keys.js';
 import * as nb2 from './nb2.js';
-import { fetchRelease, type Published } from './release.js';
+import { checkRevision, fetchRelease, type Published } from './release.js';
 import { load, loadJson, PROFILE, remove, save, saveJson } from './store.js';
 import { getToken, initTokens, listTokens, patchToken, putToken, putTokens, tokensOpen, type Phase, type TokenRecord } from './tokens.js';
 import { begin, end, fact, installFetchTrace, type Trace } from './trace.js';
@@ -46,7 +48,9 @@ let busy: string | null = null;
 let balance: bigint | null = null;
 let intentMark: string | null = null;
 /** null: the durable store is ready and this page is the profile's one writer; else why the wallet will not move value */
-let storeProblem: string | null = null;
+let storeProblem: string | null = 'starting: the wallet is read-only until the writer lock and its durable key are ready';
+/** false until the lock, the key, the deployment's records, any recovery and the reconciliation are done: no value moves before */
+let ready = false;
 const kv = new IdbKv(PROFILE);
 const traces = new Map<string, Trace>();
 const status = new Map<string, { ok: boolean; text: string }>();
@@ -67,12 +71,11 @@ const need = <T>(v: T | null | undefined, what: string): T => {
 const sess = (): nb2.Session => need(session, 'the bridge is not loaded (see Network)');
 const bytesOf = (t: TokenRecord): Uint8Array => unhex(need(t.bytes, `token ${t.id} has no token file`));
 
-/** The steps that move nothing and may run on a page that is not the profile's writer. */
-const READ_ONLY_OK = new Set(['connect', 'balance', 'trust', 'check', 'faucet-load', 'faucet']);
-/** The steps that move value or mint: the session's pinned deployment is checked again right before each (the reference wallet does the same). */
-const VALUE_STEPS = new Set(['deposit', 'mint', 'plan', 'burn', 'redeem', 'fund']);
+/** records an older build wrote without a deployment scope (`tok/<id>`, or a localStorage funding record): not read; the page offers a reset */
+let legacyKeys: string[] = [];
 /** the funding transaction signed and stored for tab B, until its receipt is read (durable, in the store) */
 let fundPending: { hash: string; raw: string; to: string } | null = null;
+let fundKey = '';
 
 /** Store the intent high-water mark with the key backup (guide: before any deposit is sent): durably, and shown beside the exported key. */
 async function backupIntents(i: IntentsRecord): Promise<void> {
@@ -90,7 +93,8 @@ async function step(key: string, fn: () => Promise<string | void>): Promise<void
   render();
   const t = begin();
   try {
-    if (storeProblem && !READ_ONLY_OK.has(key)) throw new Error(storeProblem);
+    const why = refusal(key, { storeProblem, ready, legacy: legacyKeys.length > 0 });
+    if (why) throw new Error(why);
     if (VALUE_STEPS.has(key)) await nb2.checkInstallation(sess());
     const msg = await fn();
     status.set(key, { ok: true, text: msg ?? 'done' });
@@ -108,19 +112,6 @@ async function step(key: string, fn: () => Promise<string | void>): Promise<void
   }
 }
 
-/** What is bound to the current key and not finished: deposits not minted, splits and transfers in flight, burns not redeemed. */
-function pendingWork(): string[] {
-  const out: string[] = [];
-  for (const t of listTokens()) {
-    const a = `${fmtUnits(BigInt(t.amountWei))} UCT`;
-    if (t.phase === 'planned' || t.phase === 'deposited' || t.phase === 'proven') out.push(`deposit ${t.id} (${a}) is not minted yet: only this key can mint it`);
-    if (t.phase === 'splitting') out.push(`the split of ${t.id} (${a}) is not finished`);
-    if (t.pending) out.push(`a transfer of token ${t.id} (${a}) is stored and not certified yet`);
-    if (t.phase === 'burned') out.push(`the burn of token ${t.id} (${a}) is not redeemed yet`);
-  }
-  return out;
-}
-
 // ---- network ----------------------------------------------------------------------------------------------------------------------------------
 /** Shown on the page and thrown by connect when the build has no trust pin. */
 const NO_PIN = 'This build has no trust pin (VITE_TRUST_PIN, wallet/.env.production), so the wallet does not connect: it does not take '
@@ -133,6 +124,7 @@ async function connect(): Promise<string> {
   let cfgError = '';
   session = null;
   published = null;
+  ready = false;
   try {
     published = await fetchRelease(settings.release);
     const r = published.release;
@@ -141,11 +133,7 @@ async function connect(): Promise<string> {
     if (published.publishedPin && published.publishedPin !== pin.toLowerCase().replace(/^0x/, '')) {
       fact('warning', `the operator publishes genesis ${published.publishedPin}, not the pinned ${pin}: this build is for another network generation`);
     }
-    if (published.pluginCommit && BUILD_NBP && published.pluginCommit !== BUILD_NBP) {
-      // the deployment's pins, limits and gas model are those of the plug-in revision it was released with: another revision does not open the bridge
-      throw new Error(`the manifest was released with native-bridge-plugins ${published.pluginCommit}, this build bundles ${BUILD_NBP}: the bridge stays closed (rebuild the wallet against the manifest's revision)`);
-    }
-    if (!published.pluginCommit) fact('warning', 'the manifest names no native-bridge-plugins revision: it cannot be compared with this build');
+    checkRevision(published.pluginCommit, BUILD_NBP);
   } catch (e) {
     cfgError = String(e);
   }
@@ -172,16 +160,18 @@ async function connect(): Promise<string> {
   intentMark = (await session.bridge.journal.intents())?.next ?? intentMark;
   // the records of this deployment and key only (the domain D and the owner key scope them): another deployment never meets these
   await initTokens(kv, `${hex(session.bridge.domain)}.${hex(me.publicKey).slice(0, 16)}`);
-  const fp = await kv.get('fund/pending');
-  fundPending = fp ? (JSON.parse(fp) as { hash: string; raw: string; to: string; chain?: string }) : null;
-  if (fundPending && (fundPending as { chain?: string }).chain !== session.bridge.cfg.chainId.toString()) fundPending = null;
+  fundKey = `fund/pending/${hex(session.bridge.domain)}.${hex(me.publicKey).slice(0, 16)}`;
+  const fp = await kv.get(fundKey);
+  fundPending = fp ? (JSON.parse(fp) as { hash: string; raw: string; to: string }) : null;
   if (!storeProblem) {
     // an import with the exported intent mark: find the deposits of this seed on the chain before anything else
-    const rn = await kv.get('recover/next');
-    if (rn) {
-      const found = await session.bridge.recoverDeposits(BigInt(rn));
+    const rr = await kv.get('recover/next');
+    const req = rr ? (JSON.parse(rr) as { next: string; domain: string }) : null;
+    // bound to the deployment it was asked on: another deployment leaves it for its own connect
+    if (req && req.domain === hex(session.bridge.domain)) {
+      const found = await session.bridge.recoverDeposits(BigInt(req.next));
       await kv.delete('recover/next');
-      fact('recovered deposits', `intents below ${rn}: ${found.length} deposit number(s) found`);
+      fact('recovered deposits', `intents below ${req.next}: ${found.length} deposit number(s) found`);
       intentMark = (await session.bridge.journal.intents())?.next ?? intentMark;
     }
     await reconcileRecords();
@@ -189,6 +179,11 @@ async function connect(): Promise<string> {
   if (!currentId || !getToken(currentId)) {
     const last = listTokens().at(-1);
     if (last) select(last.id);
+  }
+  // writer, durable key, records and reconciliation are settled: only now does this tab take part in a handoff, and only for this deployment
+  if (!storeProblem && !legacyKeys.length) {
+    ready = true;
+    handoff ??= new Handoff(PROFILE, hex(session.bridge.domain), me, handoffHandlers);
   }
   for (const t of listTokens()) if (t.phase === 'received') toVerify.add(t.id);
   await refreshBalances();
@@ -337,7 +332,7 @@ const STEPS: StepDef[] = [
       const out = await nb2.finishTransfer(sess(), bytesOf(t), pending);
       // stored as sent before it is posted: if the other tab misses it, "Resend" posts it again
       await patchToken(t.id, { phase: 'sent', bytes: hex(out), to: pending.toProfile, toPublicKey: pending.toPublicKey, pending: undefined });
-      handoff.sendToken(pending.toProfile, out, BigInt(t.amountWei));
+      need(handoff, 'this tab is not taking part in a handoff yet').sendToken(pending.toProfile, out, BigInt(t.amountWei));
       fact('handed to', `tab ${pending.toProfile.toUpperCase()} (${pending.toPublicKey.slice(0, 16)}…)`);
       return `sent to tab ${pending.toProfile.toUpperCase()}`;
     },
@@ -350,7 +345,7 @@ const STEPS: StepDef[] = [
       const p = peers.get(to);
       if (!p) throw new Error(`tab ${to.toUpperCase()} is not open: open it (link under Transfer), then resend`);
       if (t.toPublicKey && p.publicKey !== t.toPublicKey) throw new Error(`tab ${to.toUpperCase()} now has another key (${p.publicKey.slice(0, 16)}…): the token is owned by ${t.toPublicKey.slice(0, 16)}…`);
-      handoff.sendToken(to, bytesOf(t), BigInt(t.amountWei));
+      need(handoff, 'this tab is not taking part in a handoff yet').sendToken(to, bytesOf(t), BigInt(t.amountWei));
       fact('posted again to', `tab ${to.toUpperCase()}, ${t.bytes!.length / 2} bytes`);
       return `resent to tab ${to.toUpperCase()}`;
     },
@@ -417,7 +412,7 @@ const STEPS: StepDef[] = [
 /** Received records to verify when the page is free (step() calls verifyReceived after every step). */
 const toVerify = new Set<string>();
 
-const handoffHandlers: ConstructorParameters<typeof Handoff>[2] = {
+const handoffHandlers: ConstructorParameters<typeof Handoff>[3] = {
   peer: (p) => {
     peers.set(p.profile, p);
     render();
@@ -442,7 +437,7 @@ const handoffHandlers: ConstructorParameters<typeof Handoff>[2] = {
   })(),
 };
 /** Announced under the profile's key only once the writer lock and the key are settled (start). */
-let handoff!: Handoff;
+let handoff: Handoff | undefined;
 
 /** Verify one received record: the plug-in and the owner check; then it is a held token ('minted'). A failure is kept on the record. */
 async function verifyOne(id: string): Promise<string> {
@@ -557,17 +552,28 @@ function identityCard(): HTMLElement {
     ),
     h('div', { class: 'row' },
       h('button', { class: 'link', onclick: showBackup }, 'export key'),
+      legacyKeys.length ? h('button', { onclick: () => void step('reset', async () => {
+        const typed = prompt(`This profile holds records from an older build (${legacyKeys.length}). Resetting deletes them and the journals of this profile, and keeps the key (export it first).\n\nType "reset" to continue.`);
+        if ((typed ?? '').trim().toLowerCase() !== 'reset') throw new Error('not reset');
+        await kv.rewrite(['tok/', 'nb2/', 'fund/', 'recover/', 'backup/'], []);
+        remove('fund.pending');
+        remove('intents.backup');
+        location.reload();
+        return 'reset';
+      }) }, 'reset this profile (older build)') : '',
       h('details', { class: 'inline' }, h('summary', {}, 'import key'), importBox, h('label', {}, 'deposit intent mark ', markBox, h('span', { class: 'muted' }, ' (from the export: finds the deposits of this key)')), h('button', {
         onclick: () => void step('import', async () => {
           // one guarded step, like every other: the writer lock and the busy flag are held while the pending work and the balance are read and the key is replaced
           const secret = parseBackup(importBox.value);
           const mark = markBox.value.trim();
           if (mark && !/^\d{1,9}$/.test(mark)) throw new Error('the intent mark is the number shown next to the exported key');
-          const blocking = pendingWork();
-          if (blocking.length) {
+          // every deployment's records and every journal of the profile, not only the active scope's
+          const scan = await scanProfile(kv);
+          const blocking = [...scan.unfinished, ...(session ? [] : ['the bridge is not connected, so the profile cannot be inspected for a recovery request'])];
+          if (blocking.length || scan.legacy.length || legacyKeys.length) {
             showBackup();
-            alert(`This tab's key cannot be replaced while work signed by it is pending:\n\n- ${blocking.join('\n- ')}\n\nFinish it first. Export the current key (shown below) before you replace it.`);
-            throw new Error('not replaced: work signed by the current key is pending');
+            alert(`This tab's key cannot be replaced while work signed by it is unfinished:\n\n- ${[...blocking, ...(scan.legacy.length || legacyKeys.length ? ['records of an older build are present: reset the profile first'] : [])].join('\n- ')}\n\nFinish it first. Export the current key (shown below) before you replace it.`);
+            throw new Error('not replaced: unfinished work in this profile');
           }
           let held: bigint | null = null;
           try {
@@ -575,16 +581,16 @@ function identityCard(): HTMLElement {
           } catch {
             held = null;
           }
-          const atRisk = valueAtRisk({ address: me.evmAddress, balance: held, tokens: listTokens() });
+          const atRisk = valueAtRisk({ address: me.evmAddress, balance: held, tokens: scan.records });
           if (atRisk.length) {
             showBackup();
-            const typed = prompt(`The current key still has:\n\n- ${atRisk.join('\n- ')}\n\nReplacing it deletes the only stored copy of its secret, and this tab's journal and token records (they belong to it). `
+            const typed = prompt(`The current key still has:\n\n- ${atRisk.join('\n- ')}\n\nReplacing it deletes the only stored copy of its secret, and this profile's journals and token records (they belong to it). `
               + `Save the current key and the intent mark first (shown on the page under Identity).\n\nType "${CONFIRM_WORD}" to replace it anyway.`);
             if (!confirmed(typed)) throw new Error('not replaced: the current key is kept');
           }
-          me = await replaceKeyDurable(kv, secret);
+          // the key and its recovery request (bound to this deployment) are one transaction; value moves stay off until the reload has recovered and reconciled
+          me = await replaceKeyDurable(kv, secret, mark ? { next: mark, domain: hex(sess().bridge.domain) } : undefined);
           remove('intents.backup');
-          if (mark) await kv.put('recover/next', mark);
           location.reload();
           return 'key replaced';
         }),
@@ -620,26 +626,23 @@ function fundPeer(): HTMLElement | string {
         });
         rec = { hash: `0x${hex(signed.hash)}`, raw: hex(signed.raw), to: (to = p!.profile) };
         // the exact signed transaction is committed to the durable store before it is broadcast: a reload then finds it and never signs a second one
-        await kv.put('fund/pending', JSON.stringify({ ...rec, chain: s.bridge.cfg.chainId.toString() }));
+        await kv.put(fundKey, JSON.stringify(rec));
         fundPending = rec;
         fact('tx', rec.hash);
       }
       try {
-        await s.bridge.evm.sendRaw(unhex(rec.raw));
+        fact('broadcast', await nb2.sendFunding(s.bridge.evm, rec));
       } catch (e) {
-        // an ambiguous 503, or a node that already holds these exact bytes: the receipt decides. Any other refusal of a tx the chain has not seen: nothing was sent.
-        if (e instanceof AmbiguousBroadcast || /already known|known transaction|already imported|already exists/i.test(String(e))) fact('broadcast', String(e));
-        else {
-          if (e instanceof RpcError && !(await s.bridge.evm.receipt(unhex(rec.hash)))) {
-            await kv.delete('fund/pending');
-            fundPending = null;
-          }
-          throw e;
+        // a plain refusal of a tx the chain has not seen: nothing was sent
+        if (e instanceof RpcError && !(await s.bridge.evm.receipt(unhex(rec.hash)))) {
+          await kv.delete(fundKey);
+          fundPending = null;
         }
+        throw e;
       }
       const hash = unhex(rec.hash);
       const rc = await waitFor(`the receipt of ${rec.hash}`, 180_000, async () => (await s.bridge.evm.receipt(hash)) ?? undefined, 1500);
-      await kv.delete('fund/pending');
+      await kv.delete(fundKey);
       fundPending = null;
       await refreshBalances();
       return `${rc.status === '0x1' ? 'sent' : 'reverted:'} 0.001 UCT to tab ${to.toUpperCase()}`;
@@ -815,12 +818,17 @@ async function start(): Promise<void> {
   try {
     const w = await acquireWriter(PROFILE);
     if (!w.ok) storeProblem = w.problem;
-    else me = (await loadOrCreateDurable(kv)).burner;
+    else {
+      me = (await loadOrCreateDurable(kv)).burner;
+      const scan = await scanProfile(kv);
+      legacyKeys = [...scan.legacy, ...(load('fund.pending') ? ['localStorage fund.pending'] : [])];
+      // the wallet is read-only until connect has also opened the deployment's records and finished any recovery
+      storeProblem = legacyKeys.length ? 'This profile was written by an older build of the wallet (its records have no deployment scope, which this build needs). It is not read. Export your key, then reset the profile below to continue.' : null;
+    }
     intentMark = load('intents.backup');
   } catch (e) {
     storeProblem = String(e instanceof Error ? e.message : e);
   }
-  handoff = new Handoff(PROFILE, me, handoffHandlers);
   render();
   await step('connect', async () => {
     const msg = await connect();

@@ -105,11 +105,14 @@ export async function loadOrCreateDurable(kv: IdbKv): Promise<{ burner: Burner; 
   return { burner: burnerFrom(secret), created: true };
 }
 
-/** Replace the key: the profile's journal and records (they belong to the old secret) are cleared and the new key committed, in this order. */
-export async function replaceKeyDurable(kv: IdbKv, secret: Uint8Array): Promise<Burner> {
+/**
+ * Replace the key. The profile's journal and records (they belong to the old secret) are deleted, the new key written and, when the user gave
+ * the exported intent mark, a recovery request bound to the deployment (its domain D), all in ONE transaction: a crash leaves the old state or
+ * the whole new one, never a new key without its recovery request or the old key with an empty journal.
+ */
+export async function replaceKeyDurable(kv: IdbKv, secret: Uint8Array, recover?: { next: string; domain: string }): Promise<Burner> {
   const b = burnerFrom(secret);
-  await kv.clear();
-  await kv.put(KEY_IN_STORE, hex(secret));
+  await kv.rewrite([''], [[KEY_IN_STORE, hex(secret)], ...(recover ? [['recover/next', JSON.stringify(recover)] as [string, string]] : [])]);
   save('key', hex(secret));
   return b;
 }

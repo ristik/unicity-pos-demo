@@ -8,9 +8,9 @@ import { isAddress } from './evm.js';
 import { eqBytes, hex, unhex } from './hex.js';
 
 export type Message =
-  | { type: 'hello'; from: string; publicKey: string; evmAddress: string }
+  | { type: 'hello'; from: string; domain: string; publicKey: string; evmAddress: string }
   | { type: 'who'; from: string }
-  | { type: 'token'; from: string; to: string; bytes: string; amountWei: string };
+  | { type: 'token'; from: string; to: string; domain: string; bytes: string; amountWei: string };
 
 /** Largest token file accepted over the channel (hex characters): a token is a few KB; this only bounds what a stray tab can make us store. */
 export const MAX_TOKEN_HEX = 2_000_000;
@@ -28,10 +28,10 @@ export function parseMessage(d: unknown): Message | null {
     case 'who':
       return { type: 'who', from: m.from };
     case 'hello':
-      return isHex(m.publicKey, 66) && isAddress(m.evmAddress) ? { type: 'hello', from: m.from, publicKey: m.publicKey, evmAddress: m.evmAddress } : null;
+      return isHex(m.domain, 64) && isHex(m.publicKey, 66) && isAddress(m.evmAddress) ? { type: 'hello', from: m.from, domain: m.domain.toLowerCase(), publicKey: m.publicKey, evmAddress: m.evmAddress } : null;
     case 'token':
-      return isProfile(m.to) && isHex(m.bytes) && typeof m.amountWei === 'string' && /^\d{1,40}$/.test(m.amountWei)
-        ? { type: 'token', from: m.from, to: m.to, bytes: m.bytes, amountWei: m.amountWei } : null;
+      return isProfile(m.to) && isHex(m.domain, 64) && isHex(m.bytes) && typeof m.amountWei === 'string' && /^\d{1,40}$/.test(m.amountWei)
+        ? { type: 'token', from: m.from, to: m.to, domain: m.domain.toLowerCase(), bytes: m.bytes, amountWei: m.amountWei } : null;
     default:
       return null;
   }
@@ -39,11 +39,16 @@ export function parseMessage(d: unknown): Message | null {
 
 export interface Peer { profile: string; publicKey: string; evmAddress: string }
 
+/**
+ * A tab advertises itself only when it is the profile's writer, holds a durable key and has its inbox ready (the wallet constructs a Handoff
+ * only then), and only to peers of the same deployment: `domain` (the deployment domain D, hex) is in every announcement and token message,
+ * and a peer or token of another domain is ignored.
+ */
 export class Handoff {
   private readonly ch: BroadcastChannel | null;
   readonly peers = new Map<string, Peer>();
 
-  constructor(readonly profile: string, private readonly me: { publicKey: Uint8Array; evmAddress: string }, private readonly on: {
+  constructor(readonly profile: string, readonly domain: string, private readonly me: { publicKey: Uint8Array; evmAddress: string }, private readonly on: {
     peer?: (p: Peer) => void;
     token?: (m: Extract<Message, { type: 'token' }>) => void;
   }) {
@@ -62,12 +67,16 @@ export class Handoff {
   private post(m: Message): void {
     this.ch?.postMessage(m);
   }
+  close(): void {
+    this.ch?.close();
+  }
   hello(): void {
-    this.post({ type: 'hello', from: this.profile, publicKey: hex(this.me.publicKey), evmAddress: this.me.evmAddress });
+    this.post({ type: 'hello', from: this.profile, domain: this.domain, publicKey: hex(this.me.publicKey), evmAddress: this.me.evmAddress });
   }
 
   private receive(m: Message): void {
     if (m.from === this.profile) return;
+    if (m.type !== 'who' && m.domain !== this.domain) return; // another deployment: never a recipient, never an inbox
     if (m.type === 'who') this.hello();
     else if (m.type === 'hello') {
       const p = { profile: m.from, publicKey: m.publicKey, evmAddress: m.evmAddress };
@@ -77,7 +86,7 @@ export class Handoff {
   }
 
   sendToken(to: string, bytes: Uint8Array, amountWei: bigint): void {
-    this.post({ type: 'token', from: this.profile, to, bytes: hex(bytes), amountWei: amountWei.toString() });
+    this.post({ type: 'token', from: this.profile, to, domain: this.domain, bytes: hex(bytes), amountWei: amountWei.toString() });
   }
 }
 
