@@ -310,7 +310,7 @@ docker exec unicity-node ubft-validator status
 ```
 
 - **Public P2P and permissionless handoff.** Each validator submits its own proof. Any validator can publish the result once all proofs are recorded. Each node verifies activation from its own synced root.
-- **Restart the node with the same volume.** Keep the authority running. Losing the authority process requires key rotation.
+- **Replace only the node, using the same volume.** If the authority exits, stop and contact maintainers if registered, bonded or unsure. If confirmed unregistered and unbonded with no unresolved submissions, initialize a fresh authority in a separate volume. [Handbook](https://github.com/ristik/bft-core/blob/integration/enshrined-evm/docs/operations/validator-handbook.md#authority-loss) · [#1286](https://github.com/ristik/bft-core/issues/1286)
 - **Operator resources.** The public release provides the image, verified seed and public peer lists. The handbook covers upgrades and retirement. [Demo commands](https://github.com/ristik/unicity-pos-demo/blob/main/demo/add-validator.md)
 
 ---
