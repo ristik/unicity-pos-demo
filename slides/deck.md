@@ -22,7 +22,7 @@ style: |
 Demo for public testnet `tn-public-20261122`
 
 <!-- Speaker: 45 min. About 15 min of slides, about 20 min demo, 10 min Q&A.
-Status words: "done" = merged and run live on the dev server; "planned" = the target for the end of this iteration.
+The public testnet starts with four validators. The fifth join and operator exit were tested in private rehearsals.
 Check the release and rehearsal status before presenting the live flow. -->
 
 ---
@@ -86,7 +86,7 @@ the stack · proof of stake · governance · bridge · tested limits · maturity
 | | |
 |---|---|
 | Generation | `tn-public-20261122` · PoS on ValidatorRegistry |
-| Validators | **4 at genesis**, then a live fifth join. Ordered-seat PoS profile supports up to **16**. |
+| Validators | **4 at genesis**. The fifth join was rehearsed privately. The PoS profile supports up to **16** ordered seats. |
 | Weight | `⌊bonded principal / 100 UCT⌋` |
 | Elections | the boundary requires both round and UC time thresholds |
 | Governance | FoundationMultisig 3-of-5, delay 2,000 rounds **and** 3,600 s |
@@ -103,7 +103,7 @@ the stack · proof of stake · governance · bridge · tested limits · maturity
 | `GET /api/v1/trustbases` | UTB history (CBOR) |
 | `/faucet/` | hCaptcha faucet |
 | `/demo/`, `/demo/pos.html` | wallet, PoS visualizer |
-| `/release/` | NB2 v1.1 manifest, trust-base bundle and genesis EntryID |
+| `/release/` | NB2 v1.1 manifest, pinned UTB history and moving B1 checkpoint |
 
 </div>
 </div>
@@ -214,7 +214,7 @@ Forks keep `main` as the upstream-sync branch. UTB v2 is merged upstream (bft-go
 | 7. exit | voluntary exit | `requestRetirement(id)` | excluded at the next election; leaves at that boundary |
 | 8. withdraw | withdraw | `mature` → `claim` | after holds and the evidence window, the principal goes to the withdrawal address |
 
-The node does steps 5 and 8's waiting on its own: no operator action between bonding and joining. <span class="plan">`ubft validator` verbs for steps 2–4 and 7–8 are planned alongside the PoS module (VT-04); today they are contract calls.</span>
+`ubft validator apply` registers, bonds, and binds the keys. Publish the assignment proof, then enroll the authority for the activated epochs. Use `validator exit` to request retirement and `validator claim` after the bond matures.
 
 ---
 
@@ -317,8 +317,8 @@ ubft validator status
 - **At the boundary:** watch the verified handoff and read the activated root and shard epochs. Enroll the authority for those epochs using the handbook. The private rehearsal reached five registered committee members 3m 24s after apply began.
 - **Keys** stay on your machine, one per service. The signing authority holds the EVM key and signs only typed operations its policy allows. Its keys are in memory, so **a restart means a key rotation** (`ubft validator rotate`).
 - **Leaving:** `requestRetirement` → excluded at the next election → after holds and the evidence window, `mature` → `claim` to the withdrawal address.
-- **Upgrades** are scheduled on chain (`ScheduleActivation`): <span class="plan">`status` and the `unicity_upgrade_required` metric will say when to install a release (VT-07, VT-12, planned).</span>
-- <span class="plan">Planned:</span> a public sync seed (VT-11), monitoring and alerts (VT-12), and the full handbook with a dress rehearsal (VT-13).
+- **Upgrades:** `validator upgrade` checks the on-chain schedule on activation-capable releases. The exporter reports `unicity_upgrade_required`.
+- **Operator resources:** the public sync seed is available under `/release/`. The validator and Foundation handbooks cover monitoring, alerts and the rehearsed operator lifecycle.
 
 ---
 
@@ -330,7 +330,7 @@ ubft validator status
 4. **Burn** a whole part, naming the EVM recipient and a segment index.
 5. **Redeem** the ordinary route if it fits. An oversized return continues in bounded transactions against the same lineage commitment, advances certified gap proofs and settles with **`redeemRecovered`**. The vault pays directly.
 
-- The receiver verifies **locally**: the token plus its UTB history. The only fetch is newer trust-base entries, each checked against its predecessor. **Validator rotations under PoS don't break old tokens.**
+- The receiver verifies **locally** with its held UTB history and B1 checkpoint. When either is too old for a certificate, the wallet refreshes it. Each UTB successor is checked against its predecessor. **Old tokens still verify after validator rotation.**
 - No bridge database, indexer or relayer: payments are sealed into segments of K = 64, and the wallet builds its proofs from public logs.
 - Before burning, **preflight** prices the ordinary and continuation routes against the release limits and the payer budget. Progress receipts let an interrupted payer resume.
 
@@ -356,7 +356,7 @@ const r     = await bridge.planReturn(parts[1], evmRecipient, payer, { admission
 await bridge.burn(r.returnId, owner, admission, evmRecipient);  // durable private backup before certification
 ```
 
-- **Plain endpoints:** the public JSON-RPC and the aggregator. Nothing a provider returns is trusted; it can only delay you.
+- **Deployment trust:** the operator’s HTTPS download channel supplies the digest-pinned release and moving B1 checkpoint (`/release/nb2-origin.json`, #1283). The wallet verifies chain evidence from JSON-RPC and the aggregator.
 - **Crash-safe by design:** every step is journaled (`putIf` compare-and-swap) and resumes after a crash, never repeating an irreversible action. You persist the seed backup, the journal and the tokens. Everything else is rebuilt.
 - **Limits:** use the release’s calibrated gas, encoded bytes, fee and history bounds. Use the reference wallet’s packet runner for continuation.
 - **Trust across epochs:** SDK 4.0 `TrustBaseHistory`, pinned by the genesis entry ID, verifies any epoch's certificates offline, whoever the stake elected then.
@@ -426,15 +426,15 @@ The burn side is final at once on both. The hard part is a weak verifier, and he
 
 ## Maturity: where we are, and what's left
 
-| Area | Done (merged, run live) | End of this iteration (planned) | Later |
+| Area | Shipped or rehearsed | Next | Later |
 |---|---|---|---|
-| **PoS** | P85 lifecycle and #1215 ordered-seat custody up to 16 | package VR/P85 and rehearse the fifth join | production economics: delegation, downtime slashing, jailing; audit |
+| **PoS** | public VR/P85 with up to 16 ordered seats (#1215). The fifth validator joined in private rehearsal | — | production economics and audit |
 | **Registry & handoff** | VR, governance CLI, registry admission, handoff (roots + nodes), operator enrollment | — | live PoA → PoS switch on one network (VT-17) |
-| **PoA (intermediate)** | PoaElection, multisig, `validator apply/exit/rejoin/rotate` | — | retired once PoS is live |
-| **Live config & upgrades** | aggregator set, committee limits, add/update partition, execution revision in the identity | fee parameters (VT-06c); activation schedule in roots + ureth (VT-07a/b) | partition retirement (VT-18) |
-| **Operator tooling** | `init/doctor/status`, authority-held keys, ureth key persistence | sync seed (VT-11), monitoring + alerts (VT-12), handbook + dress rehearsal (VT-13) | recoverable key custody (an authority restart is a rotation today) |
-| **NB2 v1.1** | lineage commitments, certified continuation, and `redeemRecovered` (#1108) | publish the qualified v1.1 deployment | mint format follow-up (#1257) |
-| **Consensus** | weighted quorum, any-age trust, silent-leader fix (#1210) | — | durable per-round proposal record, needed before real stake (#1212); 128-root resume (#982) |
+| **PoA (intermediate)** | PoaElection, multisig, `validator apply/exit/rejoin/rotate` | — | — |
+| **Live config & upgrades** | live fees (VT-06c), activation schedules (VT-07), aggregator and committee config | — | partition retirement (VT-18) |
+| **Operator tooling** | verified sync seed (VT-11), monitoring and alerts (VT-12), operator handbooks and rehearsal (VT-13) | — | recoverable key custody |
+| **NB2 v1.1** | public on `tn-public-20261122`. The HTTPS download channel selects the deployment and serves its moving B1 checkpoint (#1283). | real-value recovery qualification (#1269) | UTB-verifiable release binding (#1282), mint format (#1257) |
+| **Consensus** | weighted quorum, historical trust, silent-leader fix (#1210), durable proposal slot reservations (#1212) | — | 128-root resume (#982) |
 
 **Not yet:** independent audit · evidence from more than one server and operator · a decentralized aggregator (central at launch) · migrations (a testnet reset is a new network).
 
