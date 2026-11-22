@@ -17,6 +17,7 @@ import { hex, unhex } from '../src/hex.js';
 import { IdbKv } from '../src/idb.js';
 import { burnerFrom } from '../src/keys.js';
 import * as nb2 from '../src/nb2.js';
+import { authenticatedOrigin } from '../src/release.js';
 import { begin, end } from '../src/trace.js';
 import { getToken, initTokens, patchToken, putToken } from '../src/tokens.js';
 import { WORLD_GAS, key, setup, VAULT } from './world.js';
@@ -177,4 +178,15 @@ test('the old-epoch check and the forgeries', async () => {
   assert.ok(decodeToken(f.bytes).proofs.length === decodeToken(part).proofs.length);
   assert.ok(Nb2Error);
   assert.ok(VAULT.length === 20);
+});
+
+test('the B1 origin requires a pinned release digest', async () => {
+  const { s } = await (await world()).open();
+  const digest = 'ab'.repeat(32);
+  const release = { ...s.published, sha256: digest, release: {
+    pins: {}, trust: { origin: { usableEpoch: '2', rootRound: '400' } },
+  } };
+  assert.deepEqual(authenticatedOrigin(release, digest), { usableEpoch: 2n, rootRound: 400n });
+  assert.throws(() => authenticatedOrigin(release, 'cd'.repeat(32)), /does not match/);
+  assert.throws(() => authenticatedOrigin({ ...release, release: { pins: {} } }, digest), /needs a B1 origin/);
 });

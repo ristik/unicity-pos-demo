@@ -140,11 +140,12 @@ function committeeCard(): HTMLElement {
   const nodeOf = new Map<string, string>();
   for (const m of entry?.members ?? []) nodeOf.set(keccakHex(`0x${hex(m.sigKey)}`), m.nodeId);
   const W = cm.members.reduce((a, m) => a + m.weight, 0n);
-  const rows = cm.members.map((m) => {
+  const rows = cm.members.map((m, ordinal) => {
     const i = identity(m.id);
     const lots = m.lot ? [m.lot] : i?.lots ?? [];
     const ret = i?.retirementRequested ? (i.retirement?.imported ? badge('retirement imported', 'warn') : badge('retirement requested', 'warn')) : badge('active', 'good');
     return h('tr', {},
+      h('td', { class: 'num' }, String(ordinal + 1)),
       h('td', { class: 'num' }, h('strong', {}, sid(m.id))),
       h('td', {}, i ? mono(i.owner) : '—'),
       h('td', {}, mono(m.rootKeyHash), nodeOf.get(m.rootKeyHash) ? h('div', { class: 'muted', title: nodeOf.get(m.rootKeyHash) }, `node …${nodeOf.get(m.rootKeyHash)!.slice(-8)}`) : ''),
@@ -177,7 +178,7 @@ function committeeCard(): HTMLElement {
       stat('EVM threshold ⌊W/2⌋+1', String(W ? W / 2n + 1n : 0n)),
       stat('first round', String(cm.firstRound), `policy ${cm.policyID}`)),
     h('div', { class: 'scroll' }, h('table', { class: 'grid' },
-      h('thead', {}, h('tr', {}, ...['StakingID', 'owner', 'root key hash', 'EVM key', 'weight q', 'bond lots', 'gen', 'retirement'].map((x) => h('th', {}, x)))),
+      h('thead', {}, h('tr', {}, ...['seat', 'StakingID', 'owner', 'root key hash', 'EVM key', 'weight q', 'bond lots', 'gen', 'retirement'].map((x) => h('th', {}, x)))),
       h('tbody', {}, ...rows))),
     bar,
     h('div', { class: 'hypobox' },

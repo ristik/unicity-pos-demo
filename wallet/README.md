@@ -226,6 +226,8 @@ node e2e/drive.mjs http://127.0.0.1:4173/demo/ \
   a:policy:payer.json a:pick:back a:step:plan a:authorize-backup a:step:burn a:step:redeem
 ```
 
+For a local browser fixture, run `npx tsx test/http-fixture.ts "$RELEASE_DIR"` from `wallet/`. Source the generated `pins.env` before building, point `serve.mjs --gateway` at `http://127.0.0.1:18551`, and use the generated `payer.json`. The fixture auto-funds its simulated accounts. It exercises the browser flow without the public deployment.
+
 The browser profile, and with it the tabs' keys and IndexedDB, lives in `PROFILE_DIR` (default: `unicity-demo-e2e-profile` in the OS temp directory). Successive runs therefore continue the same wallets. Delete the directory
 to start with new keys. Set `CHROME` if Chromium is not at the macOS default path, and `CHROME_ARGS` for flags such as `--no-sandbox`. The exit status is 1 if a step failed.
 
