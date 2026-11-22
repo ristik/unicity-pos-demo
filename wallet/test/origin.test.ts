@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { AggregatorClient } from '@unicitylabs/state-transition-sdk/lib/api/AggregatorClient.js';
 import { MAX_NB2_ORIGIN_BYTES } from '@unicitylabs/native-bridge-plugin/nb2';
 import { OriginFeed, originFeed, readCheckpointBytes } from '../src/origin.js';
-import { refreshWalletAuthority } from '../src/trust.js';
+import { refreshTrust, refreshWalletAuthority } from '../src/trust.js';
 import { begin, end, installFetchTrace } from '../src/trace.js';
 import { makeRoot } from './world.js';
 
@@ -79,6 +80,38 @@ test('an invalid cached checkpoint is discarded and the authenticated feed can r
   assert.equal(refreshed.checkpointFailed, false);
   assert.equal(refreshed.trust.origin?.rootRound, 133n);
   assert.equal(JSON.parse(saved!).rootRound, '133');
+});
+
+test('a stalled UTB transport times out without losing a persisted B1 advance', { timeout: 2_000 }, async (t) => {
+  const trust = (await makeRoot()).trust.withAuthenticatedOrigin(initial);
+  const agg = new AggregatorClient('https://test.example/aggregator');
+  const deadline = AbortSignal.timeout(300);
+  let savedWhilePending = false;
+  let sawAbort = false;
+  const store = {
+    get: async () => null,
+    put: async () => { savedWhilePending = !deadline.aborted; },
+    delete: async () => {},
+  };
+  const feed = new OriginFeed(trust, binding, initial, url, store);
+  t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input) === url.href) return Response.json(document);
+    assert.match(String(input), /\/api\/v1\/trustbases/);
+    assert.equal(init?.signal, deadline);
+    // The upstream request never responds. Only its own transport signal can settle it.
+    return new Promise<Response>((_resolve, reject) => {
+      deadline.addEventListener('abort', () => {
+        sawAbort = true;
+        reject(deadline.reason);
+      }, { once: true });
+    });
+  });
+  const refreshed = await refreshWalletAuthority(trust, () => refreshTrust(trust, agg, deadline), feed, initial.rootRound);
+  assert.equal(sawAbort, true);
+  assert.equal(savedWhilePending, true);
+  assert.equal(refreshed.historyFailed, true);
+  assert.equal(refreshed.checkpointFailed, false);
+  assert.equal(refreshed.trust.origin?.rootRound, 133n);
 });
 
 test('checkpoint transport enforces the decoded byte cap before buffering an oversized chunk', async (t) => {

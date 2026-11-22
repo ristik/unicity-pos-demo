@@ -79,10 +79,10 @@ export async function bootstrapTrust(agg: AggregatorClient, pinHex: string, netw
 }
 
 /** Fetch the entries after the held tip (each authenticated from its predecessor) and persist; returns how many were appended. */
-export async function refreshTrust(trust: TrustInput, agg: AggregatorClient): Promise<number> {
+export async function refreshTrust(trust: TrustInput, agg: AggregatorClient, signal = AbortSignal.timeout(15_000)): Promise<number> {
   const before = trust.history.tip?.epoch ?? 0n;
   try {
-    const n = await TrustBaseUpdater.update(trust.history, [agg], { limits: { ...TRUST_BASE_PAGE_LIMITS, maxEntries: 64 } });
+    const n = await TrustBaseUpdater.update(trust.history, [agg], { signal, limits: { ...TRUST_BASE_PAGE_LIMITS, maxEntries: 64 } });
     if (n > 0) await persist(trust);
     return n;
   } catch (e) {

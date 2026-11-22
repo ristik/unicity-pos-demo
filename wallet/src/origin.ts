@@ -127,7 +127,7 @@ export class OriginFeed {
     const deadline = performance.now() + waitMs;
     for (;;) {
       if (performance.now() - this.fetchedAt >= REFRESH_INTERVAL_MS || this.fetchedAt === 0) {
-        const res = await fetch(this.url, { cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(6_000) });
+        const res = await fetch(this.url, { cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(15_000) });
         if (!res.ok) throw new Error(`B1 checkpoint feed returned HTTP ${res.status}.`);
         await this.accept(await readCheckpointBytes(res), true);
         this.fetchedAt = performance.now();
