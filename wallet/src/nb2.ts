@@ -30,6 +30,7 @@ import { eqBytes, hex, sleep, unhex } from './hex.js';
 import type { Burner } from './keys.js';
 import type { Published } from './release.js';
 import { type PayerPolicy, type RecoveryResult, pollOrdinaryPayout, redeemOrdinary, recoverStep, retainTerminal, walletAdmission } from './recovery.js';
+import type { SaveReturnBackup } from './return-backup.js';
 import type { IdbKv } from './idb.js';
 import { fact } from './trace.js';
 
@@ -292,14 +293,12 @@ export async function planReturn(s: Session, token: Uint8Array, recipient: Uint8
 }
 
 /** Repeat admission, and store the private signed request before certification. */
-export async function burn(s: Session, returnId: Uint8Array, note?: (reason: string) => void, store?: IdbKv, policy?: PayerPolicy): Promise<{ burned: Uint8Array; eta: Uint8Array; evidenceBytes: number }> {
-  const recovery = store && recoveryWallet(s, store);
+export async function burn(s: Session, returnId: Uint8Array, store: IdbKv, saveBackup: SaveReturnBackup, note?: (reason: string) => void, policy?: PayerPolicy): Promise<{ burned: Uint8Array; eta: Uint8Array; evidenceBytes: number }> {
+  const recovery = recoveryWallet(s, store);
   const rec = await returnRecord(s, `0x${hex(returnId)}`);
-  const b = await retry(() => s.bridge.burn(returnId, s.owner, recovery && walletAdmission(recovery, policy, true), rec ? unhex(rec.recipient) : undefined), note);
-  if (recovery) {
-    const committed = await returnRecord(s, `0x${hex(returnId)}`);
-    if (committed) await retainTerminal(recovery, committed);
-  }
+  const b = await retry(() => s.bridge.burn(returnId, s.owner, walletAdmission(recovery, policy, saveBackup), rec ? unhex(rec.recipient) : undefined), note);
+  const committed = await returnRecord(s, `0x${hex(returnId)}`);
+  if (committed) await retainTerminal(recovery, committed);
   const evidenceBytes = evidenceOf(b.burned).length;
   fact('redemption ID eta', `0x${hex(b.eta)}`);
   fact('lineage evidence', `${evidenceBytes} bytes`);

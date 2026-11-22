@@ -21,7 +21,7 @@ import { Chain, isZero, show, type CallRecord } from './chain.js';
 import { PARAMS_MS, POLL_MS, posAddresses, SLOW_MS, SPACING_MS, TRUST_MS } from './config.js';
 import { ASSIGNMENT_STATE, FN, LOT_CATEGORY, REASON, RECORD_KIND, REJECT_AFTER_ROUNDS, RESULT_STATE, type FnName } from './contracts.js';
 import {
-  asMembers, clockKey, discover, eligibleMember, ineligibility, rawWeight, readClock, readCommittee, readIdentity, readOpenResult, readParams, readRecord, readResult,
+  activeEvmKey, asMembers, clockKey, discover, eligibleMember, ineligibility, rawWeight, readClock, readCommittee, readIdentity, readOpenResult, readParams, readRecord, readResult,
   type Clock, type Committee, type Identity, type OpenResult, type Params, type RecordView, type ResultView,
 } from './model.js';
 import { custodyCard, configCard, governanceCard, identitiesCard as vrIdentitiesCard, moduleCard, outputCard, type Deps, type VrLogs } from './vrcards.js';
@@ -149,7 +149,7 @@ function committeeCard(): HTMLElement {
       h('td', { class: 'num' }, h('strong', {}, sid(m.id))),
       h('td', {}, i ? mono(i.owner) : '—'),
       h('td', {}, mono(m.rootKeyHash), nodeOf.get(m.rootKeyHash) ? h('div', { class: 'muted', title: nodeOf.get(m.rootKeyHash) }, `node …${nodeOf.get(m.rootKeyHash)!.slice(-8)}`) : ''),
-      h('td', {}, i?.delegation ? mono(i.delegation.evmKey) : mono(m.evmKeyHash)),
+      h('td', {}, mono(activeEvmKey(m, i))),
       h('td', { class: 'num' }, h('strong', {}, String(m.weight)), m.rawWeight !== m.weight ? h('span', { class: 'muted' }, ` (x ${m.rawWeight})`) : ''),
       h('td', {}, lots.length ? lots.map((l) => `lot ${l.lotID}: ${uct(l.remaining)} · ${l.refCount} refs`).join(', ') : '—', i ? h('div', { class: 'muted' }, `principal ${uct(i.principal)}`) : ''),
       h('td', { class: 'num' }, String(m.generation)),
@@ -178,7 +178,7 @@ function committeeCard(): HTMLElement {
       stat('EVM threshold ⌊W/2⌋+1', String(W ? W / 2n + 1n : 0n)),
       stat('first round', String(cm.firstRound), `policy ${cm.policyID}`)),
     h('div', { class: 'scroll' }, h('table', { class: 'grid' },
-      h('thead', {}, h('tr', {}, ...['seat', 'StakingID', 'owner', 'root key hash', 'EVM key', 'weight q', 'bond lots', 'gen', 'retirement'].map((x) => h('th', {}, x)))),
+      h('thead', {}, h('tr', {}, ...['seat', 'StakingID', 'owner', 'root key hash', 'EVM key or seat hash', 'weight q', 'bond lots', 'gen', 'retirement'].map((x) => h('th', {}, x)))),
       h('tbody', {}, ...rows))),
     bar,
     h('div', { class: 'hypobox' },

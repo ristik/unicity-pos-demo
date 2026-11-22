@@ -3,7 +3,9 @@
  */
 import { keccak_256 as HE } from '@noble/hashes/sha3.js';
 import { eqBytes as eq, hex, unhex } from './hex.js';
+import type { SaveReturnBackup } from './return-backup.js';
 import type { IdbKv } from './idb.js';
+import { abs } from './config.js';
 import type { Session } from './nb2.js';
 const hx = (v: Uint8Array): string => `0x${hex(v)}`;
 interface Wallet extends Pick<Session, 'bridge' | 'trust' | 'pins' | 'signer'> {
@@ -43,7 +45,13 @@ export interface PayerPolicy {
 }
 
 export function readPayerPolicy(content: string): PayerPolicy {
-  const p = JSON.parse(content);
+  let p;
+  try {
+    p = JSON.parse(content);
+  } catch {
+    throw new Error('Invalid return payer policy JSON.');
+  }
+  if (p === null || typeof p !== 'object' || Array.isArray(p)) throw new Error('Invalid return payer policy JSON.');
   if (!Number.isSafeInteger(p.signedBytes) || p.signedBytes <= 0 || !Number.isSafeInteger(p.calldataBytes)
     || p.calldataBytes <= 0 || (p.archives !== undefined && (!Array.isArray(p.archives) || p.archives.some((url: unknown) => typeof url !== 'string')))) {
     throw new Error('invalid return payer policy');
@@ -51,7 +59,19 @@ export function readPayerPolicy(content: string): PayerPolicy {
   return { gas: uint(p.gas), signedBytes: p.signedBytes, calldataBytes: p.calldataBytes, maxNonce: uint(p.maxNonce),
     maxFeePerGas: uint(p.maxFeePerGas), maxPriorityFeePerGas: uint(p.maxPriorityFeePerGas),
     maxTransactionFee: p.maxTransactionFee === undefined ? undefined : uint(p.maxTransactionFee),
-    feeBudget: uint(p.feeBudget), archives: p.archives ?? [] };
+    feeBudget: uint(p.feeBudget), archives: (p.archives ?? []).map(publicArchive) };
+}
+
+/** Authenticated archives belong behind a fixed same-origin route. A direct reader must be public. */
+function publicArchive(input: string): string {
+  if (input === '/archive-rpc') return input;
+  let url: URL | undefined;
+  try { url = new URL(input); } catch { /* invalid URL */ }
+  if (!url || !/^https:\/\/[^/?#@]+\/?$/i.test(input) || url.protocol !== 'https:' || url.username || url.password
+    || url.pathname !== '/' || url.search || url.hash) {
+    throw new Error('Archive readers need a public HTTPS origin or the same-origin /archive-rpc proxy.');
+  }
+  return url.origin;
 }
 
 interface ReleaseRecovery {
@@ -202,7 +222,7 @@ function ordinaryEnvelope(w: Wallet, policy: PayerPolicy): ReturnAdmission['ordi
   return { encodedBytes: BigInt(Math.min(policy.signedBytes, policy.calldataBytes)), gas: policy.gas, gasFor: ordinaryGas(w) };
 }
 
-export function walletAdmission(w: Wallet, policy?: PayerPolicy, backup = false): ReturnAdmission {
+export function walletAdmission(w: Wallet, policy?: PayerPolicy, saveBackup?: SaveReturnBackup): ReturnAdmission {
   return {
     ordinaryEnvelope: policy && ordinaryEnvelope(w, policy),
     checkOrdinary: w.release.recovery === undefined && policy === undefined ? undefined : async (rec, gas) => {
@@ -235,7 +255,7 @@ export function walletAdmission(w: Wallet, policy?: PayerPolicy, backup = false)
         observed: String(segment < a ? a : segment), receiptP99Ms: String(release.backlog.receiptP99Ms),
         finalInclusionMs: String(release.backlog.finalInclusionMs), qualifiedForMs: String(release.backlog.qualifiedForMs) };
     },
-    beforeCertification: backup ? async (rec) => { await publishReturnBackup(w, rec); } : undefined,
+    beforeCertification: saveBackup && (async (rec) => saveBackup(await encodeReturnBackup(w, rec))),
   };
 }
 
@@ -290,7 +310,7 @@ interface Backup {
   checkpoint?: RecoveryJournal; paid?: ReturnRecord['paid'];
 }
 
-export async function publishReturnBackup(w: Wallet, rec: ReturnRecord): Promise<string> {
+export async function encodeReturnBackup(w: Wallet, rec: ReturnRecord): Promise<string> {
   if (!rec.burnRequest || !rec.certificationLocator) throw new Error('sign the return before exporting a relayer backup');
   const saved = await loadRecovery(w, rec);
   const { source, amount, returnId, recipient, a, startHead, fromBlock, sealReceipt, burnTx, burnRequest, certificationLocator } = rec;
@@ -304,9 +324,7 @@ export async function publishReturnBackup(w: Wallet, rec: ReturnRecord): Promise
     recover: rec.recovery ? true : undefined, handoff: active ? 'active' : undefined,
     activePayer: active && payer ? hx(payer.address) : undefined, terminal: complete ? saved!.evidence : rec.burned, complete,
     paid: rec.paid?.receipt ? rec.paid : undefined };
-  const content = JSON.stringify(copy);
-  await w.store.put(`return/backup/${hx(w.bridge.domain)}/${rec.returnId}`, content);
-  return content;
+  return JSON.stringify(copy);
 }
 /** All wallet return commands pass through this Paid-first gate before qualifying or signing. */
 export async function reconcileReturn(w: Wallet, rec: ReturnRecord, policy?: PayerPolicy,
@@ -487,7 +505,7 @@ function advanceCursor(cursor: Cursor, packet: Awaited<ReturnType<typeof packetO
 }
 
 function readers(w: Wallet, policy: PayerPolicy): EvmReader[] {
-  return [w.bridge.evm, ...policy.archives.map((url) => new EvmReader(new HttpJsonRpc(url)))];
+  return [w.bridge.evm, ...policy.archives.map((url) => new EvmReader(new HttpJsonRpc(abs(url))))];
 }
 
 async function withFreshAuthority<T>(w: Wallet, f: () => Promise<T>): Promise<T> {
@@ -817,4 +835,3 @@ async function reconcilePendingPacket(w: Wallet, rec: ReturnRecord, release: Rel
   }
   return confirm(acquired.receipt);
 }
-

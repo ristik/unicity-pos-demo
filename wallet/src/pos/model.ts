@@ -157,6 +157,13 @@ export interface Identity {
   evmKeyRegistered: boolean;
 }
 
+export function activeEvmKey(seat: Exposure, identity?: Identity): string {
+  const delegation = identity?.delegation;
+  return identity?.id === seat.id && identity.generation === seat.generation && delegation?.evmKeyHash.toLowerCase() === seat.evmKeyHash.toLowerCase()
+    ? delegation.evmKey
+    : seat.evmKeyHash;
+}
+
 /** keyOwner results that are final (a key, once registered, is tombstoned to its identity forever) */
 const keyOwnerFinal = new Map<string, boolean>();
 const excludedFinal = new Set<bigint>();

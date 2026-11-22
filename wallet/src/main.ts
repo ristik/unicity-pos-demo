@@ -24,7 +24,8 @@ import { READ_ONLY_OK, VALUE_STEPS, importBlock, OperationGuard, refusal } from 
 import { burnerFrom, loadExisting, loadOrCreateDurable, parseBackup, replaceKeyDurable, toMnemonic, type Burner } from './keys.js';
 import * as nb2 from './nb2.js';
 import { authenticatedOrigin, checkRevision, fetchRelease, type Published } from './release.js';
-import { publishReturnBackup, readPayerPolicy } from './recovery.js';
+import { encodeReturnBackup, readPayerPolicy } from './recovery.js';
+import { chooseReturnBackup, type SaveReturnBackup } from './return-backup.js';
 import { load, loadJson, PROFILE, remove, save, saveJson } from './store.js';
 import { getToken, initTokens, listTokens, patchToken, putToken, putTokens, tokensOpen, type Phase, type TokenRecord } from './tokens.js';
 import { begin, end, fact, installFetchTrace, type Trace } from './trace.js';
@@ -90,7 +91,7 @@ async function backupIntents(i: IntentsRecord): Promise<void> {
 }
 
 /** Run one step: its trace is kept for the drawer, its outcome shown on its row. */
-async function step(key: string, fn: () => Promise<string | void>): Promise<void> {
+async function step(key: string, fn: () => Promise<string | void>, prepare?: () => Promise<void>): Promise<void> {
   if (!opGuard.tryEnter(key)) return;
   busy = key;
   status.delete(key);
@@ -99,6 +100,7 @@ async function step(key: string, fn: () => Promise<string | void>): Promise<void
   try {
     const why = refusal(key, { storeProblem, ready, legacy: legacyKeys.length > 0, keyDurable });
     if (why) throw new Error(why);
+    await prepare?.();
     if (VALUE_STEPS.has(key)) await nb2.checkInstallation(sess());
     const msg = await fn();
     status.set(key, { ok: true, text: msg ?? 'done' });
@@ -250,7 +252,7 @@ interface StepDef {
   input?: () => HTMLElement;
   /** a line under the step about what a Run will do (a pending transaction it resumes) */
   note?: (t: TokenRecord | undefined) => string | undefined;
-  run: () => Promise<string>;
+  run: (saveBackup?: SaveReturnBackup) => Promise<string>;
 }
 
 const amountInput = h('input', { value: load('amount') ?? '0.1', size: '8', inputmode: 'decimal', 'aria-label': 'deposit amount in UCT' });
@@ -265,9 +267,9 @@ const planRecipient = recipientField();
 const burnRecipient = recipientField();
 const policyInput = h('textarea', { id: 'return-policy', rows: '5', 'aria-label': 'return payer policy',
   placeholder: 'Paste the day-of-demo payer policy JSON',
-  oninput: (e: Event) => save('return.policy', (e.target as HTMLTextAreaElement).value),
-}, load('return.policy') ?? '');
-const backupConsent = h('input', { type: 'checkbox', 'aria-label': 'allow private return backup' });
+});
+// Clear policies retained by the earlier build. The current input stays in this page only.
+remove('return.policy');
 const coldRoute = h('input', { type: 'checkbox', 'aria-label': 'use continuation if ordinary no longer fits' });
 const policy = () => policyInput.value.trim() ? readPayerPolicy(policyInput.value) : undefined;
 
@@ -397,14 +399,13 @@ const STEPS: StepDef[] = [
     },
   },
   {
-    key: 'burn', title: 'Burn for return', phase: ['minted'], when: (t) => !t.pending, what: 'The preflight runs again on fresh chain state, then the burn is certified: it signs the recipient, the amount and the index a, and its redemption ID eta is fixed from here on. The burn is irreversible.',
-    input: () => h('span', {}, burnRecipient, h('label', {}, backupConsent, ' Save the private return backup before certification')),
-    note: (t) => (t?.phase !== 'minted' ? undefined : t.burning ? 'A burn of this token is in progress: Run resumes it with the same request.' : t.returnId ? `Planned return ${t.returnId.slice(0, 14)}… to ${t.recipient}.` : undefined),
-    run: async () => {
+    key: 'burn', title: 'Burn for return', phase: ['minted'], when: (t) => !t.pending, what: 'The preflight runs again on fresh chain state, then the burn is certified: it signs the recipient, the amount and the index a, and its redemption ID eta is fixed from here on. The wallet submits the exact request once the private backup file is saved. The certified burn is irreversible.',
+    input: () => burnRecipient,
+    note: (t) => (t?.phase !== 'minted' ? undefined : t.burning ? 'A signed burn is held. Choose a private backup file and Run to resume the same request.' : t.returnId ? `Planned return ${t.returnId.slice(0, 14)}… to ${t.recipient}.` : undefined),
+    run: async (saveBackup) => {
       const t = currentOr('select a token');
       const s = sess();
       const jr = t.returnId ? await nb2.returnRecord(s, t.returnId) : null;
-      if (sess().published.release.recovery && !backupConsent.checked && (!jr || jr.status === 'planned')) throw new Error('Authorize the private return backup before burning');
       let id = t.returnId;
       if (jr === null || jr.status === 'planned') {
         const plan = await nb2.planReturn(s, bytesOf(t), unhex(jr ? jr.recipient : recipientOf(t)), (why) => fact('waiting', why), kv, policy());
@@ -416,7 +417,7 @@ const STEPS: StepDef[] = [
       await patchToken(t.id, { burning: true });
       let b: Awaited<ReturnType<typeof nb2.burn>>;
       try {
-        b = await nb2.burn(s, unhex(id!), (why) => fact('waiting', why), kv, policy());
+        b = await nb2.burn(s, unhex(id!), kv, need(saveBackup, 'Choose a private backup file'), (why) => fact('waiting', why), policy());
       } catch (e) {
         const r = await nb2.returnRecord(s, id!);
         if (r === null || r.status === 'planned') await patchToken(t.id, { burning: undefined });
@@ -574,7 +575,11 @@ function stepRow(d: StepDef, t: TokenRecord | undefined): HTMLElement {
       h('span', { class: 'dot' }),
       h('strong', {}, d.title),
       d.input?.() ?? '',
-      h('button', { disabled: !enabled, onclick: () => void step(d.key, d.run) }, busy === d.key ? 'running…' : 'Run'),
+      h('button', { disabled: !enabled, onclick: () => {
+        let saveBackup: SaveReturnBackup | undefined;
+        const prepare = d.key === 'burn' ? async () => { saveBackup = await chooseReturnBackup(window as Parameters<typeof chooseReturnBackup>[0]); } : undefined;
+        void step(d.key, () => d.run(saveBackup), prepare);
+      } }, busy === d.key ? 'running…' : 'Run'),
       st ? h('span', { class: st.ok ? 'msg' : 'msg bad' }, st.text) : ''),
     h('p', { class: 'what' }, d.what),
     d.note?.(t) ? h('p', { class: 'warn' }, d.note(t)!) : '',
@@ -749,22 +754,22 @@ function flowCard(): HTMLElement {
   const t = current();
   const toks = listTokens();
   const picker = toks.length
-    ? h('select', { onchange: (e: Event) => { select((e.target as HTMLSelectElement).value); render(); } },
+    ? h('select', { disabled: !!busy, onchange: (e: Event) => { select((e.target as HTMLSelectElement).value); render(); } },
       ...toks.map((x) => h('option', { value: x.id, selected: x.id === currentId }, `${x.id.startsWith('rx-') ? 'received' : x.parent ? `part ${x.id.endsWith('.back') ? 'back' : 'keep'} of ${x.parent}` : `deposit ${x.id.slice(1)}`} · ${fmtUnits(BigInt(x.amountWei))} UCT · ${x.phase === 'received' ? 'received, not verified' : x.phase}${x.pending ? ' · transfer pending' : ''}${x.burning ? ' · burn in progress' : ''}`)))
     : h('span', { class: 'muted' }, 'none yet: deposit some UCT');
   peerSelect.replaceChildren(...[...peers.values()].map((p) => h('option', { value: p.profile }, `tab ${p.profile.toUpperCase()}`)));
   if (!peers.size) peerSelect.append(h('option', { value: '' }, 'no other tab'));
   return card('Asset flow',
     h('div', { class: 'row' }, h('span', {}, 'token: '), picker, t?.tokenId ? mono(t.tokenId) : ''),
-    h('details', {}, h('summary', {}, 'Return payer policy'), h('p', { class: 'what' }, 'Set explicit gas, byte, nonce and fee ceilings, plus optional archive RPCs. Use one payer for the full return.'), policyInput),
+    h('details', {}, h('summary', {}, 'Return payer policy'), h('p', { class: 'what' }, 'Set explicit gas, byte, nonce and fee ceilings, plus optional public archive origins or /archive-rpc. The policy stays in this tab until reload. Use one payer for the full return.'), policyInput),
     t?.returnId && (t.eta || t.burning) ? h('button', { disabled: !!busy || !ready, onclick: () => void step('return-backup', async () => {
       const s = sess();
       const rec = need(await nb2.returnRecord(s, t.returnId!), 'No signed return to back up');
-      const content = await publishReturnBackup(nb2.recoveryWallet(s, kv), rec);
+      const content = await encodeReturnBackup(nb2.recoveryWallet(s, kv), rec);
       const url = URL.createObjectURL(new Blob([content], { type: 'application/json' }));
       h('a', { href: url, download: `nb2-return-${rec.returnId.slice(2, 14)}.private.json` }).click();
       setTimeout(() => URL.revokeObjectURL(url), 10_000);
-      return 'Private signed return backup saved. Share it only with the chosen payer.';
+      return 'Private return backup download started. Share it only with the chosen payer.';
     }) }, 'Download private return backup') : '',
     status.get('return-backup')?.text ?? '',
     h('ol', { class: 'timeline' }, ...STEPS.map((d) => stepRow(d, t))),

@@ -1,14 +1,14 @@
 # Add the fifth validator
 
-Use the operator release and seed for `tn-public-20261122`. The public network starts with four validators. Run this from a dedicated operator account on the dev host. Run the release, seed, follower and authority setup from the validator handbook. Before the demonstration, confirm both artifact hashes, the operator’s P2P ports, the admission cutoff and the target epoch. Fund the operator with at least 100 UCT plus gas. [Validator handbook](https://github.com/ristik/bft-core/blob/e54b522b08d7418408f3f947ba4217f7e4097c76/docs/operations/validator-handbook.md)
+Use the operator release and seed for `tn-public-20261122`. The public network starts with four validators. Run this from a dedicated operator account on the dev host. Run the release, seed, follower and authority setup from the validator handbook in its `$HOME/validator` home. Keep that same `UBFT_HOME` for the commands below. Before the demonstration, confirm both artifact hashes, the operator’s P2P ports, the admission cutoff and the target epoch. Fund the operator with at least 100 UCT plus gas. [Validator handbook](https://github.com/ristik/bft-core/blob/e54b522b08d7418408f3f947ba4217f7e4097c76/docs/operations/validator-handbook.md)
 
-The commands below are from the operator’s rehearsal draft. The packaged VR/P85 generation and rehearsal timings are pending. [Packaging issue](https://github.com/ristik/bft-core/issues/1277)
+The commands below are from the operator’s rehearsal draft. The four-validator backend is up. The measured join timing awaits the private rehearsal. [Packaging issue](https://github.com/ristik/bft-core/issues/1277)
 
 ## Register and bond
 
 ```bash
 umask 077
-export UBFT_HOME="$HOME/tn-public-20261122-validator-5"
+export UBFT_HOME="$HOME/validator"
 cd "$UBFT_HOME"
 CUSTODY=$(jq -er '.custody' release/deployment.json)
 ubft validator status --custody "$CUSTODY" --json

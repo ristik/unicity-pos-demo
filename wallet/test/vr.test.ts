@@ -14,7 +14,7 @@ import { parseParam, parseTuple, parseSignature, selectorOf, type AbiType } from
 import { Chain, type Addresses } from '../src/pos/chain.js';
 import { CHANGE_PAYLOAD, FN, POA_TAG, POS_TAG, type FnName } from '../src/pos/contracts.js';
 import { boundaryOf, describeChange, modeOf, partitionOf, poaAction, readVr, readVrPointers, type VrModel } from '../src/pos/vr.js';
-import { readCommittee } from '../src/pos/model.js';
+import { activeEvmKey, readCommittee, readIdentity } from '../src/pos/model.js';
 import { hex, unhex } from '../src/hex.js';
 
 // ---- a small ABI encoder (the page has only a decoder) -------------------------------------------------------------------------------------------
@@ -141,6 +141,13 @@ function fixture(sc: Scenario) {
     msSigners: () => [ADDR(0x11), ADDR(0x12), ADDR(0x13), ADDR(0x14), ADDR(0x15)], msNextSigners: () => [ADDR(0), ADDR(0), ADDR(0), ADDR(0), ADDR(0)], msNonce: () => 7, msSignersPending: () => false,
     msNotBeforeProgress: () => 0, msNotBeforeTime: () => 0,
     custodyElection: () => ELECTION,
+    generationLots: () => [],
+    isIndexed: () => true,
+    excluded: () => false,
+    keyOwner: () => ({ id: 1, role: 2 }),
+    delegation: () => ({ bindingHash: H(1), nextNonce: 2, binding: {
+      rootNodeID: H(1), rootKey: `0x02${'aa'.repeat(32)}`, evmNodeID: H(2), evmKey: `0x03${'bb'.repeat(32)}`, operatorPayee: ADDR(1),
+    } }),
     positions: ([id]) => ({ owner: ADDR(0x900 + Number(id)), withdrawal: ADDR(0), rootKeyHash: id === 2n && sc.custodyRk2 ? sc.custodyRk2 : H(0x100 + Number(id)), stagedRootKeyHash: H(0), generation: 1, roleNonce: 0, openLots: 1, lotCount: 1, retirementRequested: false }),
   };
   const bySelector = new Map<string, { name: FnName; fn: (typeof FN)[FnName] }>();
@@ -278,6 +285,16 @@ test('the #1215 profile reads ordered seats and each exact historical lot', asyn
   assert.deepEqual(committee.members.map((m) => [m.id, m.lot?.lotID, m.lot?.remaining]),
     Array.from({ length: 5 }, (_, n) => [BigInt(n + 1), BigInt(n + 41), 92n]));
   assert.equal(calls.some((name) => name.startsWith('assignmentExposures@')), false);
+
+  const seat = committee.members[0];
+  chain.addresses.election = ELECTION;
+  chain.addresses.evidence = ADDR(0xe111);
+  const staged = await readIdentity(chain, seat.id, []);
+  assert.notEqual(staged.delegation?.evmKeyHash, seat.evmKeyHash);
+  assert.equal(activeEvmKey(seat, staged), seat.evmKeyHash);
+  const installed = { ...seat, evmKeyHash: staged.delegation!.evmKeyHash };
+  assert.equal(activeEvmKey(installed, staged), staged.delegation?.evmKey);
+  assert.equal(activeEvmKey(installed, { ...staged, generation: 2n }), installed.evmKeyHash);
 
   const mismatch = fixture({ mode: 'pos', wrongLot: true }).chain;
   mismatch.addresses.custody = CUSTODY;

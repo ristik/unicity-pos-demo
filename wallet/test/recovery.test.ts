@@ -35,7 +35,7 @@ test('continuation resumes the exact signed bytes and reaches certified Paid', a
   const { token } = await nb2.mint(browser, deposit.intent);
   const eligible = await nb2.planReturn(browser, token, unhex(me.evmAddress), undefined, kv, caps);
   assert.ok(eligible.record.recovery);
-  await nb2.burn(browser, eligible.returnId, undefined, kv, caps);
+  await nb2.burn(browser, eligible.returnId, kv, async (backup) => assert.ok(JSON.parse(backup).pending.burnRequest), undefined, caps);
   const rec = (await nb2.returnRecord(browser, hx(eligible.returnId)))!;
   const stored = `return/recovery/${hx(chain.domain)}/${rec.returnId}`;
   const read = async () => JSON.parse((await kv.get(stored))!);

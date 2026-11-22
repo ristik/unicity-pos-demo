@@ -119,7 +119,7 @@ Build with the UTB genesis EntryID (`VITE_TRUST_PIN`), the SHA-256 of the authen
 
 ### Return payer policy
 
-Paste the reference wallet’s payer policy JSON in **Return payer policy**. It sets the gas, byte, nonce and fee ceilings for the return and can list archive RPCs. **Plan return** reports whether the measured ordinary route or continuation fits. Check **Save the private return backup before certification** before running **Burn**. The wallet commits the exact request to IndexedDB before it is certified. Download the private backup and keep it with the return records.
+Paste the reference wallet’s payer policy JSON in **Return payer policy**. It sets the gas, byte, nonce and fee ceilings for the return and can list public HTTPS archive origins or the same-origin `/archive-rpc` proxy for an authenticated provider. The policy is held in the tab and must be re-entered after reload. **Plan return** reports whether the measured ordinary route or continuation fits. Run **Burn** in a browser that supports the Save File picker and choose a private destination outside the browser profile. The wallet journals the signed request, saves the portable backup, and waits for the file to close successfully before submitting for certification. If the save fails, Run again to save and resume the same request. Keep the private file with your return records.
 
 **Redeem** shares payment and fee reconciliation across both routes. When continuation is active, press **Run** to authenticate the next Progress or gap receipt. Repeat until the vault records a certified `Paid` receipt. After a reload the wallet replays its certified checkpoints and reconciles any exact signed transaction still pending. Use the same payer and profile to resume in-flight progress. If an ordinary burn later exceeds its envelope, select the continuation option after reconciling any pending ordinary transaction. [NB2 v1.1 wallet guide](https://github.com/ristik/native-bridge-plugins/blob/a2ce55ffe4a221ed0f25b7954084d6379528dd20/docs/nb2-wallet-guide.md)
 
@@ -219,14 +219,14 @@ a host with the package needs no `node_modules` for the wallet.
 VITE_TRUST_PIN="$GENESIS_ENTRY_ID" VITE_NB2_RELEASE_SHA256="$RELEASE_SHA256" npm run build
 node e2e/serve.mjs --dist dist --nb2 "$RELEASE_DIR" --port 4173 &
 node e2e/drive.mjs http://127.0.0.1:4173/demo/ a:connect a:addr
-# Fund tab A from the operator account. Then use a policy qualified for the deployment.
+# Fund tab A and use a policy qualified for the deployment. BACKUP_PATH must name a fresh private file.
 node e2e/drive.mjs http://127.0.0.1:4173/demo/ \
   a:connect a:step:deposit a:step:mint a:step:split b:connect \
   a:handoff b:handoff b:offline a:pick:keep a:step:transfer b:received-offline \
-  a:policy:payer.json a:pick:back a:step:plan a:authorize-backup a:step:burn a:step:redeem
+  a:policy:payer.json a:pick:back a:step:plan "a:backup-file:$BACKUP_PATH" a:step:burn a:step:redeem
 ```
 
-For a local browser fixture, run `npx tsx test/http-fixture.ts "$RELEASE_DIR"` from `wallet/`. Source the generated `pins.env` before building, point `serve.mjs --gateway` at `http://127.0.0.1:18551`, and use the generated `payer.json`. The fixture auto-funds its simulated accounts. It exercises the browser flow without the public deployment.
+For a local browser fixture, run `npx tsx test/http-fixture.ts "$RELEASE_DIR"` from `wallet/`. Source the generated `pins.env` before building, point `serve.mjs --gateway` at `http://127.0.0.1:18551`, and use the generated `payer.json`. The fixture auto-funds its simulated accounts. The headless driver substitutes the native picker with a write to the private file named by BACKUP_PATH. It exercises the browser flow without the public deployment.
 
 The browser profile, and with it the tabs' keys and IndexedDB, lives in `PROFILE_DIR` (default: `unicity-demo-e2e-profile` in the OS temp directory). Successive runs therefore continue the same wallets. Delete the directory
 to start with new keys. Set `CHROME` if Chromium is not at the macOS default path, and `CHROME_ARGS` for flags such as `--no-sandbox`. The exit status is 1 if a step failed.

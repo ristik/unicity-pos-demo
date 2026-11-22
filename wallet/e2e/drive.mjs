@@ -15,7 +15,7 @@
 //   wait:<seconds>     sleep                                 dump        print the page text
 //   import:<0xkey>[=<mark>]  fill the import form and press replace; trustrefresh  press refresh from aggregator
 //   handoff            switch this tab's handoff on (a tab announces itself only when asked)
-//   policy:<file>      use the chosen payer policy; authorize-backup consents to the private signed backup
+//   policy:<file>      use the chosen payer policy; backup-file:<path> supplies a private test file for the headless picker
 //   offline | online   block or restore network access for this tab; received-offline asserts verified ownership
 //   reload             reload the page (the journal and token records are in IndexedDB: a step resumes after it)
 //
@@ -61,11 +61,19 @@ async function openTab(url) {
   await new Promise((r) => (ws.onopen = r));
   let id = 0;
   const pending = new Map();
+  let backupPath;
   ws.onmessage = (m) => {
     const d = JSON.parse(m.data);
     if (d.id && pending.has(d.id)) {
       pending.get(d.id)(d);
       pending.delete(d.id);
+    } else if (d.method === 'Runtime.bindingCalled' && d.params.name === 'writeDemoReturnBackup') {
+      let saved = false;
+      try {
+        writeFileSync(backupPath, d.params.payload, { mode: 0o600, flag: 'wx' });
+        saved = true;
+      } catch { /* the wallet must refuse to certify on write failure */ }
+      void send('Runtime.evaluate', { expression: `window.finishDemoReturnBackup(${saved})` });
     } else if (d.method === 'Runtime.consoleAPICalled' && process.env.CONSOLE) {
       console.log('  console:', d.params.args.map((a) => a.value ?? a.description).join(' '));
     }
@@ -81,7 +89,28 @@ async function openTab(url) {
     if (r.result?.exceptionDetails) throw new Error(JSON.stringify(r.result.exceptionDetails).slice(0, 400));
     return r.result?.result?.value;
   };
-  return { ev, send, close: () => ws.close() };
+  const backupFile = async (path) => {
+    backupPath = path;
+    await send('Runtime.addBinding', { name: 'writeDemoReturnBackup' });
+    await ev(`window.showSaveFilePicker = async () => ({
+      createWritable: async () => {
+        let content;
+        return {
+          write: async (value) => { content = value; },
+          close: () => new Promise((resolve, reject) => {
+            window.finishDemoReturnBackup = (saved) => {
+              delete window.finishDemoReturnBackup;
+              if (saved) resolve();
+              else reject(new Error('Could not write the headless backup file'));
+            };
+            writeDemoReturnBackup(content);
+          }),
+          abort: async () => {},
+        };
+      },
+    })`);
+  };
+  return { ev, send, backupFile, close: () => ws.close() };
 }
 
 const tabs = {};
@@ -190,8 +219,9 @@ for (const c of cmds) {
       })()`);
       break;
     }
-    case 'authorize-backup':
-      await t.ev(`document.querySelector('input[aria-label="allow private return backup"]').checked = true`);
+    case 'backup-file':
+      if (!arg) throw new Error('backup-file requires a fresh private output path');
+      await t.backupFile(arg);
       break;
     case 'offline':
     case 'online': {

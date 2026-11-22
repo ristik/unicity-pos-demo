@@ -45,7 +45,7 @@ export function explain(t: Trace | undefined): HTMLElement {
   const rows = grouped(t.calls).map(({ c, n, ms }) =>
     h('tr', {},
       h('td', {}, h('code', {}, c.method), n > 1 ? h('span', { class: 'muted' }, ` ×${n}`) : ''),
-      h('td', {}, h('code', {}, c.url.split('?')[0])),
+      h('td', {}, h('code', {}, c.url)),
       h('td', { class: c.status >= 400 || c.status === 0 ? 'bad' : '' }, String(c.status || '—')),
       h('td', { class: 'num' }, kb(c.reqBytes)),
       h('td', { class: 'num' }, kb(c.resBytes)),
