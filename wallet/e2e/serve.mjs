@@ -1,18 +1,18 @@
 // Serves a built wallet beside a native bridge v2 deployment, with no dependencies (Node 22+): the bundle at /demo/, the deployment's published
-// files (GENERATION/bridge/nb2/public/) at /nb2/, and the gateway's routes the wallet calls on its own origin.
+// files (GENERATION/bridge/nb2/public/) at /release/, and the gateway's routes the wallet calls on its own origin.
 //
 //   node e2e/serve.mjs --dist dist --nb2 <public dir> [--port 4173] [--gateway http://127.0.0.1:8545] [--faucet http://127.0.0.1:8088] [--bind 127.0.0.1]
 //
 //   /demo/*                       dist/ (the build, base /demo/)
-//   /nb2/*                        the deployment's public files
+//   /release/*                        the deployment's public files
 //   /rpc                          the gateway's JSON-RPC (POST /)
 //   /aggregator, /api/v1/trustbases   the gateway
-//   /api/*                        the faucet
+//   /faucet/api/*                 the faucet
 //
 // The gateway keys its rate limits on X-Forwarded-For and refuses a request without one (a production proxy sets it), so this adds one.
 import { createServer, request } from 'node:http';
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import { extname, join, normalize } from 'node:path';
+import { extname, isAbsolute, relative, resolve } from 'node:path';
 
 const args = Object.fromEntries(process.argv.slice(2).reduce((a, v, i, all) => (v.startsWith('--') ? [...a, [v.slice(2), all[i + 1]]] : a), []));
 const dist = args.dist ?? 'dist';
@@ -24,10 +24,12 @@ const bind = args.bind ?? '127.0.0.1';
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.map': 'application/json', '.svg': 'image/svg+xml', '.cbor': 'application/cbor' };
 
 function staticFile(root, rel, res) {
-  const file = normalize(join(root, decodeURIComponent(rel.split('?')[0])));
-  if (!file.startsWith(normalize(root))) return false;
+  const base = resolve(root);
+  const file = resolve(base, decodeURIComponent(rel.split('?')[0]));
+  const path = relative(base, file);
+  if (path === '..' || path.startsWith('../') || isAbsolute(path)) return false;
   let f = file;
-  if (existsSync(f) && statSync(f).isDirectory()) f = join(f, 'index.html');
+  if (existsSync(f) && statSync(f).isDirectory()) f = resolve(f, 'index.html');
   if (!existsSync(f) || !statSync(f).isFile()) return false;
   res.writeHead(200, { 'content-type': types[extname(f)] ?? 'application/octet-stream', 'cache-control': 'no-cache' });
   res.end(readFileSync(f));
@@ -54,11 +56,11 @@ createServer((req, res) => {
   }
   if (url.startsWith('/demo/')) {
     if (staticFile(dist, url.slice('/demo/'.length) || 'index.html', res)) return;
-  } else if (url.startsWith('/nb2/') && nb2) {
-    if (staticFile(nb2, url.slice('/nb2/'.length), res)) return;
+  } else if (url.startsWith('/release/') && nb2) {
+    if (staticFile(nb2, url.slice('/release/'.length), res)) return;
   } else if (url === '/rpc' || url.startsWith('/rpc?')) return proxy(req, res, gateway, '/');
   else if (url.startsWith('/aggregator') || url.startsWith('/api/v1/trustbases')) return proxy(req, res, gateway, url);
-  else if (url.startsWith('/api/')) return proxy(req, res, faucet, url);
+  else if (url.startsWith('/faucet/')) return proxy(req, res, faucet, url.slice('/faucet'.length));
   res.writeHead(404, { 'content-type': 'text/plain' });
   res.end('not found');
 }).listen(port, bind, () => console.log(`wallet at http://${bind}:${port}/demo/ (gateway ${gateway.origin}, faucet ${faucet.origin}, nb2 files ${nb2 ?? 'none'})`));

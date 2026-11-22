@@ -10,6 +10,7 @@ import { TrustBaseUpdater } from '@unicitylabs/state-transition-sdk/lib/api/bft/
 import { TrustInput } from '@unicitylabs/native-bridge-plugin';
 
 import { hex, unhex } from './hex.js';
+import type { OriginFeed } from './origin.js';
 import { load, save } from './store.js';
 
 export interface EntryView {
@@ -78,10 +79,10 @@ export async function bootstrapTrust(agg: AggregatorClient, pinHex: string, netw
 }
 
 /** Fetch the entries after the held tip (each authenticated from its predecessor) and persist; returns how many were appended. */
-export async function refreshTrust(trust: TrustInput, agg: AggregatorClient): Promise<number> {
+export async function refreshTrust(trust: TrustInput, agg: AggregatorClient, signal = AbortSignal.timeout(15_000)): Promise<number> {
   const before = trust.history.tip?.epoch ?? 0n;
   try {
-    const n = await TrustBaseUpdater.update(trust.history, [agg], { limits: { ...TRUST_BASE_PAGE_LIMITS, maxEntries: 64 } });
+    const n = await TrustBaseUpdater.update(trust.history, [agg], { signal, limits: { ...TRUST_BASE_PAGE_LIMITS, maxEntries: 64 } });
     if (n > 0) await persist(trust);
     return n;
   } catch (e) {
@@ -89,6 +90,32 @@ export async function refreshTrust(trust: TrustInput, agg: AggregatorClient): Pr
     if ((trust.history.tip?.epoch ?? 0n) > before) await persist(trust);
     throw e;
   }
+}
+
+/** Attempt both authorities independently and return whatever authenticated progress was made. */
+export async function refreshWalletAuthority(
+  trust: TrustInput,
+  refreshHistory: () => Promise<unknown>,
+  checkpoint?: Pick<OriginFeed, 'current' | 'refresh'>,
+  waitFromRound?: bigint,
+): Promise<{ trust: TrustInput; entriesAdded: number; historyFailed: boolean; checkpointFailed: boolean }> {
+  const previousLength = trust.history.entries.length;
+  const [historyResult, firstCheckpoint] = await Promise.allSettled([
+    (async () => refreshHistory())(),
+    (async () => checkpoint?.refresh())(),
+  ]);
+  const entriesAdded = trust.history.entries.length - previousLength;
+  let checkpointFailed = firstCheckpoint.status === 'rejected';
+  if (checkpoint && !checkpointFailed && entriesAdded === 0 && waitFromRound !== undefined &&
+      (checkpoint.current.origin?.rootRound ?? 0n) <= waitFromRound) {
+    try { await checkpoint.refresh(true); } catch { checkpointFailed = true; }
+  }
+  return {
+    trust: checkpoint?.current ?? trust,
+    entriesAdded,
+    historyFailed: historyResult.status === 'rejected',
+    checkpointFailed,
+  };
 }
 
 export async function entries(trust: TrustInput): Promise<EntryView[]> {
@@ -102,4 +129,11 @@ export async function entries(trust: TrustInput): Promise<EntryView[]> {
     totalWeight: e.totalWeight,
     members: e.members.map((m) => ({ nodeId: m.nodeId, weight: m.weight, key: hex(m.sigKey) })),
   })));
+}
+
+/** Attach independently authenticated B1 authority while preserving the history's storage scope. */
+export function withOrigin(trust: TrustInput, origin: NonNullable<TrustInput['origin']>): TrustInput {
+  const next = trust.withAuthenticatedOrigin(origin);
+  namespaces.set(next, namespaces.get(trust) ?? '');
+  return next;
 }

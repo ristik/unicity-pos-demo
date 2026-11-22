@@ -17,6 +17,8 @@ import { hex, unhex } from '../src/hex.js';
 import { IdbKv } from '../src/idb.js';
 import { burnerFrom } from '../src/keys.js';
 import * as nb2 from '../src/nb2.js';
+import { chooseReturnBackup } from '../src/return-backup.js';
+import { authenticatedOrigin, checkRevision } from '../src/release.js';
 import { begin, end } from '../src/trace.js';
 import { getToken, initTokens, patchToken, putToken } from '../src/tokens.js';
 import { WORLD_GAS, key, setup, VAULT } from './world.js';
@@ -85,12 +87,46 @@ test('deposit, mint, split, a transfer finished after a crash, return and redeem
   // return `back`: the preflight facts, the burn, the redeem
   const trace = begin();
   const recipient = new Uint8Array(20).fill(0x11);
-  const rp = await nb2.planReturn(s, back, recipient);
+  const rp = await nb2.planReturn(s, back, recipient, undefined, kv);
   assert.ok(rp.gasLimit < w.pins.userGasLimit);
   assert.equal(rp.a, 0n);
-  const b = await nb2.burn(s, rp.returnId);
+  const beforeBurn = w.agg.calls;
+  await assert.rejects(chooseReturnBackup({ showSaveFilePicker: async () => { throw new Error('Cancel'); } }), /selection canceled/);
+  assert.equal(w.agg.calls, beforeBurn);
+  const failedSave = await chooseReturnBackup({
+    showSaveFilePicker: async () => ({
+      createWritable: async () => ({
+        write: async () => undefined,
+        close: async () => { throw new Error('Disk full'); },
+        abort: async () => undefined,
+      }),
+    }),
+  });
+  await assert.rejects(nb2.burn(s, rp.returnId, kv, failedSave), /Could not save/);
+  assert.equal(w.agg.calls, beforeBurn, 'no certification was attempted');
+  const id = `0x${hex(rp.returnId)}`;
+  const pending = await nb2.returnRecord(s, id);
+  assert.equal(pending?.status, 'burn-requested');
+  assert.ok(pending.burnRequest);
+
+  let portable = '';
+  const save = await chooseReturnBackup({
+    showSaveFilePicker: async () => ({
+      createWritable: async () => ({
+        write: async (content) => { portable = content; },
+        close: async () => { assert.equal(w.agg.calls, beforeBurn); },
+        abort: async () => undefined,
+      }),
+    }),
+  });
+  const b = await nb2.burn(reopened.s, rp.returnId, reopened.kv, save);
+  const backup = JSON.parse(portable);
+  const signed = await nb2.returnRecord(s, id);
+  assert.equal(backup.pending.burnRequest, pending.burnRequest);
+  assert.equal(backup.pending.burnRequest, signed?.burnRequest);
+  assert.equal(backup.pending.recipient, `0x${hex(recipient)}`);
   assert.ok(b.evidenceBytes > 0);
-  const paid = await nb2.redeem(s, rp.returnId, () => undefined, 5, 0);
+  const paid = await nb2.redeem(s, rp.returnId, () => undefined, 5, 0, kv);
   end(trace);
   assert.equal(paid.state, 'paid');
   const facts = new Map(trace.facts);
@@ -173,4 +209,22 @@ test('the old-epoch check and the forgeries', async () => {
   assert.ok(decodeToken(f.bytes).proofs.length === decodeToken(part).proofs.length);
   assert.ok(Nb2Error);
   assert.ok(VAULT.length === 20);
+});
+
+test('the B1 origin requires a pinned release digest', async () => {
+  const { s } = await (await world()).open();
+  const digest = 'ab'.repeat(32);
+  const release = { ...s.published, sha256: digest, release: {
+    pins: {}, trust: { origin: { usableEpoch: '2', rootRound: '400' } },
+  } };
+  assert.deepEqual(authenticatedOrigin(release, digest), { usableEpoch: 2n, rootRound: 400n });
+  assert.throws(() => authenticatedOrigin(release, 'cd'.repeat(32)), /does not match/);
+  assert.throws(() => authenticatedOrigin({ ...release, release: { pins: {} } }, digest), /needs a B1 origin/);
+});
+
+test('a compatible plug-in upgrade keeps the pinned release revision', () => {
+  checkRevision('original', 'current', 'original');
+  checkRevision('current', 'current', 'original');
+  assert.throws(() => checkRevision('another', 'current', 'original'), /bridge stays closed/);
+  assert.throws(() => checkRevision('original', null, 'original'), /bridge stays closed/);
 });

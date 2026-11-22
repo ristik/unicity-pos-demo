@@ -15,12 +15,13 @@ import { load, save } from '../store.js';
 import { begin, end, installFetchTrace, type Trace } from '../trace.js';
 import { bootstrapTrust, refreshTrust } from '../trust.js';
 import { copyable, explain as explainTrace, h, mono } from '../ui.js';
+import { fifthValidator, JoinEvidence } from './join.js';
 import { keccakHex } from './abi.js';
 import { Chain, isZero, show, type CallRecord } from './chain.js';
 import { PARAMS_MS, POLL_MS, posAddresses, SLOW_MS, SPACING_MS, TRUST_MS } from './config.js';
 import { ASSIGNMENT_STATE, FN, LOT_CATEGORY, REASON, RECORD_KIND, REJECT_AFTER_ROUNDS, RESULT_STATE, type FnName } from './contracts.js';
 import {
-  asMembers, clockKey, discover, eligibleMember, ineligibility, rawWeight, readClock, readCommittee, readIdentity, readOpenResult, readParams, readRecord, readResult,
+  activeEvmKey, asMembers, clockKey, discover, eligibleMember, ineligibility, rawWeight, readClock, readCommittee, readIdentity, readOpenResult, readParams, readRecord, readResult,
   type Clock, type Committee, type Identity, type OpenResult, type Params, type RecordView, type ResultView,
 } from './model.js';
 import { custodyCard, configCard, governanceCard, identitiesCard as vrIdentitiesCard, moduleCard, outputCard, type Deps, type VrLogs } from './vrcards.js';
@@ -32,6 +33,7 @@ installFetchTrace();
 // ---- state ------------------------------------------------------------------------------------------------------------------------------------
 const settings = loadSettings();
 const chain = new Chain(abs(settings.rpc), posAddresses(), SPACING_MS);
+const joinEvidence = new JoinEvidence(chain);
 const ROLE_NAME: Record<string, string> = { vr: 'ValidatorRegistry (VR)', poa: 'PoaElection', multisig: 'FoundationMultisig', registry: 'SealRegistry', custody: 'StakeCustody', election: 'ElectionPolicy', reader: 'EligibilityReader', evidence: 'Evidence', governance: 'GovernanceParams', rewardPool: 'RewardPool' };
 
 let clock: Clock | null = null;
@@ -138,17 +140,18 @@ function committeeCard(): HTMLElement {
   const nodeOf = new Map<string, string>();
   for (const m of entry?.members ?? []) nodeOf.set(keccakHex(`0x${hex(m.sigKey)}`), m.nodeId);
   const W = cm.members.reduce((a, m) => a + m.weight, 0n);
-  const rows = cm.members.map((m) => {
+  const rows = cm.members.map((m, ordinal) => {
     const i = identity(m.id);
-    const lots = i?.lots ?? [];
+    const lots = m.lot ? [m.lot] : i?.lots ?? [];
     const ret = i?.retirementRequested ? (i.retirement?.imported ? badge('retirement imported', 'warn') : badge('retirement requested', 'warn')) : badge('active', 'good');
     return h('tr', {},
+      h('td', { class: 'num' }, String(ordinal + 1)),
       h('td', { class: 'num' }, h('strong', {}, sid(m.id))),
       h('td', {}, i ? mono(i.owner) : '—'),
       h('td', {}, mono(m.rootKeyHash), nodeOf.get(m.rootKeyHash) ? h('div', { class: 'muted', title: nodeOf.get(m.rootKeyHash) }, `node …${nodeOf.get(m.rootKeyHash)!.slice(-8)}`) : ''),
-      h('td', {}, i?.delegation ? mono(i.delegation.evmKey) : mono(m.evmKeyHash)),
+      h('td', {}, mono(activeEvmKey(m, i))),
       h('td', { class: 'num' }, h('strong', {}, String(m.weight)), m.rawWeight !== m.weight ? h('span', { class: 'muted' }, ` (x ${m.rawWeight})`) : ''),
-      h('td', {}, lots.length ? lots.map((l) => `lot ${l.lotID}: ${fmtUnits(l.remaining)}`).join(', ') : '—', i ? h('div', { class: 'muted' }, `principal ${uct(i.principal)}`) : ''),
+      h('td', {}, lots.length ? lots.map((l) => `lot ${l.lotID}: ${uct(l.remaining)} · ${l.refCount} refs`).join(', ') : '—', i ? h('div', { class: 'muted' }, `principal ${uct(i.principal)}`) : ''),
       h('td', { class: 'num' }, String(m.generation)),
       h('td', {}, ret));
   });
@@ -169,23 +172,24 @@ function committeeCard(): HTMLElement {
 
   return card('Committee now', `assignment ${short(cm.assignmentID, 6)} · root epoch ${cm.rootEpoch} · EVM epoch ${cm.evmEpoch} · ${ASSIGNMENT_STATE[Number(cm.state)] ?? cm.state}`, 'wide',
     h('div', { class: 'stats' },
-      stat('members', String(cm.members.length)),
+      stat('members', String(cm.members.length), `f = ${Math.floor((cm.members.length - 1) / 3)} at equal weight`),
       stat('total weight W', String(W)),
       stat('root quorum ⌊2W/3⌋+1', String(W ? (2n * W) / 3n + 1n : 0n)),
       stat('EVM threshold ⌊W/2⌋+1', String(W ? W / 2n + 1n : 0n)),
       stat('first round', String(cm.firstRound), `policy ${cm.policyID}`)),
     h('div', { class: 'scroll' }, h('table', { class: 'grid' },
-      h('thead', {}, h('tr', {}, ...['StakingID', 'owner', 'root key hash', 'EVM key', 'weight q', 'bond lots', 'gen', 'retirement'].map((x) => h('th', {}, x)))),
+      h('thead', {}, h('tr', {}, ...['seat', 'StakingID', 'owner', 'root key hash', 'EVM key or seat hash', 'weight q', 'bond lots', 'gen', 'retirement'].map((x) => h('th', {}, x)))),
       h('tbody', {}, ...rows))),
     bar,
     h('div', { class: 'hypobox' },
       h('div', { class: 'tag' }, `What if · hypothetical${edited ? ' (edited)' : ''} · client-side arithmetic, nothing is sent`),
+      h('p', { class: 'muted' }, 'The 3f + 1 rule gives f = 1 with four or five equal-weight validators. A second Byzantine fault requires at least seven. The quorum grows from three to four signatures.'),
       h('p', { class: 'muted' }, 'Live signer liveness is not public (the roots\' q3/signers endpoint is loopback only), so every member starts online. Untick a member to take it offline, or change its weight.'),
       ...controls,
       verdict,
       h('button', { class: 'link', disabled: !edited, onclick: () => { whatIf = new Map(); render(); } }, 'reset to live')),
     drawer('committee', [
-      'custody.lastAckedAssignment() names the active assignment; its exposures carry each member\'s committed weight q, root and EVM key hashes. ',
+      'custody.lastAckedAssignment() names the active assignment. assignmentSeatCount and assignmentSeat enumerate its ordered seats; lots(lotID) resolves each committed historical bond reference. ',
       'W = Σq; root quorum and EVM threshold are computed here (bft-go-base root_trust_base_v2.go; ARCH §3). Root node ids come from the UTB entry of the same epoch, matched by keccak256(sigKey) = rootKeyHash.',
     ], logs.committee));
 }
@@ -395,6 +399,16 @@ function identitiesCard(): HTMLElement {
 function utbCard(): HTMLElement {
   if (!trust) return card('Trust base (UTB) history', PIN && !errors.has('utb') ? 'loading…' : '', 'wide', !PIN ? h('p', { class: 'err' }, NO_PIN) : errors.has('utb') ? h('p', { class: 'err' }, errors.get('utb')!) : '');
   const es = trust.history.entries;
+  const joined = fifthValidator(trust);
+  const first = joinEvidence.first;
+  const join = joined ? h('div', { class: 'hypobox', 'data-join': 'authenticated' },
+    h('strong', {}, `4 → 5 validators · UTB epoch ${joined.next.epoch}`),
+    h('div', {}, `Old committee's signatures authenticated the new entry. Root quorum ${joined.previous.quorumThreshold} → ${joined.next.quorumThreshold}.`),
+    h('div', {}, 'Joining root ', copyable(joined.member.nodeId)),
+    first
+      ? h('div', { 'data-first-uc': String(first.block) }, `First certified EVM UC signed by the joining root · block ${first.block} · root round ${first.round} · `, copyable(first.hash))
+      : h('div', { class: 'muted' }, errors.get('join') ?? 'Searching certified EVM blocks from the start of the join epoch.'),
+  ) : h('p', { class: 'muted' }, 'Waiting for an authenticated 4 → 5 handoff.');
   const nameOf = (sigKey: Uint8Array): string => {
     const id = idOfRootKeyHash(keccakHex(`0x${hex(sigKey)}`));
     return id === null ? 'unknown' : sid(id);
@@ -421,6 +435,7 @@ function utbCard(): HTMLElement {
       signed);
   });
   return card('Trust base (UTB) history', `${es.length} entries · tip epoch ${trust.history.tip?.epoch} · every entry after genesis authenticated by its predecessor's committee`, 'wide',
+    join,
     h('div', { class: 'timeline-utb' }, ...cards),
     h('p', {}, 'A token certified in an old epoch still verifies under that epoch\'s entry: ', h('a', { href: './#check' }, 'wallet → old-epoch check and forgeries'), '.'),
     drawer('utb', [
@@ -679,6 +694,8 @@ async function loop(): Promise<void> {
     if (PIN && (!trust || now - lastTrust > TRUST_MS)) {
       if (await tier('utb', readTrustTier)) lastTrust = now;
     }
+    const joined = trust && fifthValidator(trust);
+    if (joined) await tier('join', () => joinEvidence.poll(trust!, joined));
     render();
     freshEpoch = null;
     backoff = errors.size ? Math.min(60_000, Math.max(POLL_MS * 2, backoff * 2)) : 0;

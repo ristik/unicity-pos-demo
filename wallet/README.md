@@ -1,7 +1,7 @@
 # Demo wallet
 
 A minimal in-browser wallet for the Unicity demo: Vite + TypeScript, no framework, plain DOM. It is built to a static bundle served at
-`/demo/` on the network's own origin, so `/rpc`, `/aggregator`, `/api/...` and `/nb2/` are same-origin and need no CORS.
+`/demo/` on the network's own origin, so `/rpc`, `/aggregator`, `/api/...` and `/release/` are same-origin and need no CORS.
 
 ## What it does
 
@@ -107,16 +107,21 @@ Endpoints default to same-origin paths. The *Network settings* panel overrides t
 |---|---|---|
 | `rpc` | `/rpc` | EVM JSON-RPC, the public gateway's methods. The wallet's bridge reads need `eth_getLogs` (exactly one address and an explicit numeric window of at most 10,000 blocks), `eth_getBlockReceipts` and `unicity_getSealCompanionV1` besides `eth_chainId`, `eth_blockNumber`, `eth_getBlockByNumber`/`ByHash`, `eth_call`, `eth_estimateGas`, `eth_getTransactionReceipt`, `eth_getTransactionCount`, `eth_gasPrice`/fee reads, `eth_getBalance`, `eth_getCode` and `eth_sendRawTransaction`. |
 | `aggregator` | `/aggregator` | aggregator JSON-RPC. The SDK reads trust-base pages from `/api/v1/trustbases` on the same origin. |
-| `faucet` | `/api` | faucet API: `<faucet>/network`, `<faucet>/claim` |
-| `release` | `/nb2/nb2-release.json` (or `VITE_NB2_RELEASE`) | the deployment's native bridge v2 release manifest. Its trust bundle and `trust-base.genesis.entryid` are read beside it (the manifest's `trust.bundle` names the bundle). Replaces protocol 7's `tester-config.json`. |
+| `faucet` | `/faucet/api` | faucet API: `<faucet>/network`, `<faucet>/claim` |
+| `release` | `/release/nb2-release.json` (or `VITE_NB2_RELEASE`) | the deployment's native bridge v2 release manifest. Its trust bundle and `trust-base.genesis.entryid` are read beside it (the manifest's `trust.bundle` names the bundle). The wallet also checks the release digest before using its B1 authority and continuation calibration. |
 | `trustPin` | `VITE_TRUST_PIN` at build time (`.env.production`) | the genesis EntryID that the trust history starts from. It is never taken from the server: without a pin, the page says so and does not connect. The manifest's published pin is only compared with it (a mismatch is shown as a warning). Setting it here is a developer override, and the page shows a banner while it is in use. |
 | `network` | `VITE_NETWORK_ID` or 3 | the root network id, needed only when the first trust-base page is not a complete bundle |
 
 The bridge is opened with the plug-in's installation check: the RPC's chain ID, the vault's `config()` equal to the manifest's pinned Γ, and the vault's runtime code hash
 equal to the pinned one. A refusal (`BadDeployment`) means the manifest and the node are not the same deployment (a reset network, a wrong URL or a stale manifest), and nothing is sent.
 
-`.env.production` holds the build configuration for `https://pos.staging.unicity.network/demo/`. Everything in it is public: the trust pin and contract addresses. It
-is the pin of an earlier generation: **a new network generation needs a new pin there** (or `VITE_TRUST_PIN=<genesis EntryID> npm run build`, which wins over the file).
+Build with the UTB genesis EntryID (`VITE_TRUST_PIN`), the SHA-256 of the authenticated release manifest (`VITE_NB2_RELEASE_SHA256`), and the PoS addresses from the same generation. The hashed manifest carries `trust.origin`. The public build checks the independent checkpoint at `/release/nb2-origin.json` on its pinned HTTPS release origin. It persists accepted advances per release digest, resumes from that checkpoint after reload, and refreshes on proof verification. UTB history and the B1 checkpoint advance independently. A release change still requires its own authenticated digest. The production build pins the `tn-public-20261122` release and PoS addresses in `.env.production`.
+
+### Return payer policy
+
+Paste the reference wallet’s payer policy JSON in **Return payer policy**. It sets the gas, byte, nonce and fee ceilings for the return and can list public HTTPS archive origins or the same-origin `/archive-rpc` proxy for an authenticated provider. The policy is held in the tab and must be re-entered after reload. **Plan return** reports whether the measured ordinary route or continuation fits. Run **Burn** in a browser that supports the Save File picker and choose a private destination outside the browser profile. The wallet journals the signed request, saves the portable backup, and waits for the file to close successfully before submitting for certification. If the save fails, Run again to save and resume the same request. Keep the private file with your return records.
+
+**Redeem** shares payment and fee reconciliation across both routes. When continuation is active, press **Run** to authenticate the next Progress or gap receipt. Repeat until the vault records a certified `Paid` receipt. After a reload the wallet replays its certified checkpoints and reconciles any exact signed transaction still pending. Use the same payer and profile to resume in-flight progress. If an ordinary burn later exceeds its envelope, select the continuation option after reconciling any pending ordinary transaction. [NB2 v1.1 wallet guide](https://github.com/ristik/native-bridge-plugins/blob/a2ce55ffe4a221ed0f25b7954084d6379528dd20/docs/nb2-wallet-guide.md)
 
 ### Public RPC (what the gateway must serve)
 
@@ -195,10 +200,10 @@ ssh -N -L 18545:127.0.0.1:8545 -L 18088:127.0.0.1:8088 <server>
 |---|---|---|
 | `/rpc` → `/`, `/aggregator`, `/api/v1/trustbases` | `UPSTREAM_GATEWAY` (bft-core deploy/testnet/gateway.py) | `http://127.0.0.1:18545` |
 | `/api/*`, `/faucet/*` | `UPSTREAM_FAUCET` | `http://127.0.0.1:18088` |
-| `/nb2/*` | `UPSTREAM_NB2`, or `NB2_DIR=<local copy of GENERATION/bridge/nb2/public>` | `http://127.0.0.1:18081` |
+| `/release/*` | `UPSTREAM_NB2`, or `NB2_DIR=<local copy of GENERATION/bridge/nb2/public>` | `http://127.0.0.1:18081` |
 
 `NB2_DIR` is the easiest way to get the deployment's files: `sudo cp -r <GENERATION>/bridge/nb2/public ./nb2-public` on the server, `scp -r` it, and `NB2_DIR=./nb2-public npm run dev`.
-The test `world.ts` is the plug-in's own offline simulator (native-bridge-plugins `test/nb2/world.ts` at the vendored commit), with its imports pointed at the bundled `lib/`.
+The test `world.ts` is the plug-in's own offline simulator (native-bridge-plugins `test/release/world.ts` at the vendored commit), with its imports pointed at the bundled `lib/`.
 
 hCaptcha accepts only hostnames registered for the site key, so the faucet widget does not work on localhost. For local runs, fund the burner
 address another way, for example a transfer from an operator account done on the server.
@@ -206,22 +211,28 @@ address another way, for example a transfer from an operator account done on the
 ## End-to-end run in headless Chromium
 
 `e2e/drive.mjs` drives the page over the DevTools protocol. It has no dependencies and needs Node 22 or later. Each argument is `<tab>:<command>`, where the tab is a wallet profile (`a`, `b`) or `pos`
-for the registry page. The file header lists the commands. `e2e/serve.mjs` (no dependencies either) serves the built bundle at `/demo/` with the deployment's published files at `/nb2/` and the gateway's routes, so
+for the registry page. The file header lists the commands. `e2e/serve.mjs` (no dependencies either) serves the built bundle at `/demo/` with the deployment's published files at `/release/` and the gateway's routes, so
 a host with the package needs no `node_modules` for the wallet.
 
 ```sh
-# on the host that runs the package (the package's gateway is on 127.0.0.1:8545):
-VITE_TRUST_PIN=<genesis EntryID: GENERATION/bridge/nb2/public/trust-base.genesis.entryid> npm run build      # on a machine with node_modules; copy dist/ and e2e/
-node e2e/serve.mjs --dist dist --nb2 <copy of GENERATION/bridge/nb2/public> --port 4173 &
-CHROME=<chromium or headless_shell> node e2e/drive.mjs http://127.0.0.1:4173/demo/ a:connect a:addr      # print tab A's address, then fund it (below)
-# the flow: A deposits, mints, splits, hands `keep` to B (B verifies it offline) and funds B's gas; A returns `back`; B returns `keep`
-node e2e/drive.mjs http://127.0.0.1:4173/demo/ a:connect a:step:deposit a:step:mint a:step:split b:connect a:wait:2 a:pick:keep a:step:transfer b:wait:3 b:received a:fund
-node e2e/drive.mjs http://127.0.0.1:4173/demo/ a:pick:back a:step:plan a:step:burn a:step:redeem b:connect b:step:plan b:step:burn b:step:redeem
-node e2e/drive.mjs http://127.0.0.1:4173/demo/ a:pick:keep a:check:verify a:check:unknown a:check:relabel
+# Set RELEASE_DIR and the build pins from the authenticated generation release.
+VITE_TRUST_PIN="$GENESIS_ENTRY_ID" VITE_NB2_RELEASE_SHA256="$RELEASE_SHA256" npm run build
+node e2e/serve.mjs --dist dist --nb2 "$RELEASE_DIR" --port 4173 &
+node e2e/drive.mjs http://127.0.0.1:4173/demo/ a:connect a:addr
+# Fund tab A and use a policy qualified for the deployment. BACKUP_PATH must name a fresh private file.
+node e2e/drive.mjs http://127.0.0.1:4173/demo/ \
+  a:connect a:step:deposit a:step:mint a:step:split b:connect \
+  a:handoff b:handoff b:offline a:pick:keep a:step:transfer \
+  b:online b:trustrefresh b:offline b:step:receive b:received-offline \
+  a:policy:payer.json a:pick:back a:step:plan "a:backup-file:$BACKUP_PATH" a:step:burn a:step:redeem
 ```
+
+For the public flow, tab B can fetch the checkpoint after the transfer is certified, then verify its received token offline. The headless commands above bring tab B online for the checkpoint refresh only. For a loopback test, copy the feed over authenticated HTTPS into the test release directory and build with `VITE_NB2_ORIGIN_CHANNEL` set to that loopback server's origin. Deploy a build using the public HTTPS origin.
+
+For a local browser fixture, run `npx tsx test/http-fixture.ts "$RELEASE_DIR"` from `wallet/`. Source the generated `pins.env` before building, point `serve.mjs --gateway` at `http://127.0.0.1:18551`, and use the generated `payer.json`. The fixture auto-funds its simulated accounts. The headless driver substitutes the native picker with a write to the private file named by BACKUP_PATH. It exercises the browser flow without the public deployment.
 
 The browser profile, and with it the tabs' keys and IndexedDB, lives in `PROFILE_DIR` (default: `unicity-demo-e2e-profile` in the OS temp directory). Successive runs therefore continue the same wallets. Delete the directory
 to start with new keys. Set `CHROME` if Chromium is not at the macOS default path, and `CHROME_ARGS` for flags such as `--no-sandbox`. The exit status is 1 if a step failed.
 
 **Funding is manual.** The faucet's hCaptcha rejects localhost. Instead, send tab A some UCT (about 0.2 is plenty for a 0.1 deposit and the gas) from a funded account on the server, signing on the server so the key never leaves it (the package's faucet account, with `cast send` from the tools image).
-Tab B gets its gas from tab A through `a:fund`.
+Transfer verification needs no gas. Fund tab B only if it will make its own EVM return.

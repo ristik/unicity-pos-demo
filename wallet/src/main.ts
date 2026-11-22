@@ -5,13 +5,13 @@
  */
 import './style.css';
 
-import type { TrustInput } from '@unicitylabs/native-bridge-plugin';
+import { TrustInput } from '@unicitylabs/native-bridge-plugin';
 import { AmbiguousBroadcast, RpcError, signTx, type IntentsRecord } from '@unicitylabs/native-bridge-plugin/nb2';
 import { AggregatorClient } from '@unicitylabs/state-transition-sdk/lib/api/AggregatorClient.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { secp256k1 } from '@noble/curves/secp256k1.js';
 
-import { abs, DEFAULTS, loadSettings, pinOverridden, saveSettings, type Settings } from './config.js';
+import { abs, COMPATIBLE_RELEASE_PLUGIN, DEFAULTS, loadSettings, pinOverridden, ORIGIN_CHANNEL, RELEASE_DIGEST, saveSettings, type Settings } from './config.js';
 import { isAddress } from './evm.js';
 import * as faucet from './faucet.js';
 import { forgeRelabelled, forgeUnknownKeys, sealTable, verdict } from './forge.js';
@@ -23,11 +23,14 @@ import { legacyKeysOf } from './work.js';
 import { READ_ONLY_OK, VALUE_STEPS, importBlock, OperationGuard, refusal } from './guard.js';
 import { burnerFrom, loadExisting, loadOrCreateDurable, parseBackup, replaceKeyDurable, toMnemonic, type Burner } from './keys.js';
 import * as nb2 from './nb2.js';
-import { checkRevision, fetchRelease, type Published } from './release.js';
+import { OriginFeed, originFeed, releaseCheckpoint } from './origin.js';
+import { authenticatedOrigin, checkRevision, fetchRelease, type Published } from './release.js';
+import { encodeReturnBackup, readPayerPolicy } from './recovery.js';
+import { chooseReturnBackup, type SaveReturnBackup } from './return-backup.js';
 import { load, loadJson, PROFILE, remove, save, saveJson } from './store.js';
 import { getToken, initTokens, listTokens, patchToken, putToken, putTokens, tokensOpen, type Phase, type TokenRecord } from './tokens.js';
-import { begin, end, fact, installFetchTrace, type Trace } from './trace.js';
-import { bootstrapTrust, entries, refreshTrust } from './trust.js';
+import { begin, end, fact, installFetchTrace, reportStepFailure, type Trace } from './trace.js';
+import { bootstrapTrust, entries, refreshTrust, refreshWalletAuthority, withOrigin } from './trust.js';
 import { copyable, explain, h, mono } from './ui.js';
 
 installFetchTrace();
@@ -42,6 +45,7 @@ const settings: Settings = loadSettings();
 let me: Burner = loadExisting() ?? burnerFrom(secp256k1.utils.randomSecretKey());
 let trust: TrustInput | null = null;
 let published: Published | null = null;
+let checkpointFeed: OriginFeed | undefined;
 let session: nb2.Session | null = null;
 let currentId: string | null = load('current');
 let busy: string | null = null;
@@ -89,7 +93,7 @@ async function backupIntents(i: IntentsRecord): Promise<void> {
 }
 
 /** Run one step: its trace is kept for the drawer, its outcome shown on its row. */
-async function step(key: string, fn: () => Promise<string | void>): Promise<void> {
+async function step(key: string, fn: () => Promise<string | void>, prepare?: () => Promise<void>): Promise<void> {
   if (!opGuard.tryEnter(key)) return;
   busy = key;
   status.delete(key);
@@ -98,14 +102,12 @@ async function step(key: string, fn: () => Promise<string | void>): Promise<void
   try {
     const why = refusal(key, { storeProblem, ready, legacy: legacyKeys.length > 0, keyDurable });
     if (why) throw new Error(why);
+    await prepare?.();
     if (VALUE_STEPS.has(key)) await nb2.checkInstallation(sess());
     const msg = await fn();
     status.set(key, { ok: true, text: msg ?? 'done' });
   } catch (e) {
-    const text = e instanceof Error ? `${e.name === 'Error' ? '' : `${e.name}: `}${e.message}` : String(e);
-    fact('error', text);
-    status.set(key, { ok: false, text });
-    console.error(e);
+    status.set(key, reportStepFailure(e));
   } finally {
     end(t);
     traces.set(key, t);
@@ -126,8 +128,10 @@ async function connect(): Promise<string> {
   const pin = settings.trustPin.trim();
   if (!pin) throw new Error(NO_PIN);
   let cfgError = '';
+  let origin: NonNullable<TrustInput['origin']> | undefined;
   session = null;
   published = null;
+  checkpointFeed = undefined;
   ready = false;
   try {
     published = await fetchRelease(settings.release);
@@ -137,28 +141,46 @@ async function connect(): Promise<string> {
     if (published.publishedPin && published.publishedPin !== pin.toLowerCase().replace(/^0x/, '')) {
       fact('warning', `the operator publishes genesis ${published.publishedPin}, not the pinned ${pin}: this build is for another network generation`);
     }
-    checkRevision(published.pluginCommit, BUILD_NBP);
+    origin = authenticatedOrigin(published, RELEASE_DIGEST);
+    checkRevision(published.pluginCommit, BUILD_NBP, COMPATIBLE_RELEASE_PLUGIN);
   } catch (e) {
     cfgError = String(e);
   }
   const r = await bootstrapTrust(agg, pin, settings.network, '', published?.bundle);
-  trust = r.trust;
-  // a stored or shipped history may be epochs behind (the network hands off every few minutes): catch up before anything verifies against it
-  try {
-    const n = await refreshTrust(trust, agg);
-    if (n > 0) fact('trust refresh', `${n} entries appended to the held history`);
-  } catch (e) {
-    fact('trust refresh', `failed, keeping the held history: ${String(e)}`);
+  trust = origin ? withOrigin(r.trust, origin) : r.trust;
+  if (origin && !storeProblem) {
+    const saved = await kv.get(`return/authority/${hex(trust.id)}`);
+    if (saved) {
+      const held = await TrustInput.fromBundle(unhex(saved), trust.id);
+      for (const entry of held.history.entries) await trust.history.append(entry);
+    }
   }
   fact('trust pin', `${pin} (from ${pinOverridden(settings) ? 'the Network settings: a developer override' : 'the build'})`);
-  fact('trust history', `${r.source}, epochs ${trust.history.entries[0].epoch}..${trust.history.tip?.epoch}`);
   if (cfgError) {
+    await refreshWalletTrust(agg);
     fact('bridge', cfgError);
     return `trust loaded (epoch ${trust.history.tip?.epoch}); no bridge: ${cfgError}`;
   }
+  if (ORIGIN_CHANNEL && !storeProblem) {
+    const { binding, checkpoint } = releaseCheckpoint(published!, trust, RELEASE_DIGEST);
+    checkpointFeed = new OriginFeed(trust, binding, checkpoint, originFeed(published!.url, ORIGIN_CHANNEL), kv);
+    try {
+      if (!await checkpointFeed.restore()) fact('B1 checkpoint cache', 'Invalid cached checkpoint discarded.');
+    } catch {
+      fact('B1 checkpoint cache', 'Could not read or clear the cached checkpoint. Checking the authenticated feed.');
+    }
+    trust = checkpointFeed.current;
+  }
+  // Refresh both authorities before opening, keeping whichever authenticated update is available.
+  await refreshWalletTrust(agg);
+  fact('trust history', `${r.source}, epochs ${trust.history.entries[0].epoch}..${trust.history.tip?.epoch}`);
   session = await nb2.openSession({
     settings, me, trust, published: published!, journal: kv, backup: backupIntents,
-    refreshTrust: async () => { await refreshTrust(trust!, agg); },
+    refreshTrust: async () => {
+      if (navigator.onLine === false) return trust!;
+      await refreshWalletTrust(agg, session?.trust.origin?.rootRound);
+      return trust!;
+    },
   });
   fact('installation check', `chain ${session.bridge.cfg.chainId}, config() = the pinned Γ, the vault's runtime code hash: passed`);
   intentMark = (await session.bridge.journal.intents())?.next ?? intentMark;
@@ -240,18 +262,33 @@ interface StepDef {
   input?: () => HTMLElement;
   /** a line under the step about what a Run will do (a pending transaction it resumes) */
   note?: (t: TokenRecord | undefined) => string | undefined;
-  run: () => Promise<string>;
+  run: (saveBackup?: SaveReturnBackup) => Promise<string>;
 }
 
 const amountInput = h('input', { value: load('amount') ?? '0.1', size: '8', inputmode: 'decimal', 'aria-label': 'deposit amount in UCT' });
 const splitInput = h('input', { value: load('split') ?? '0.04', size: '8', inputmode: 'decimal', 'aria-label': 'part to return in UCT' });
-const recipientInput = h('input', { placeholder: 'EVM address (default: this wallet)', size: '44', 'aria-label': 'return recipient' });
+const recipientField = () => h('input', { placeholder: 'EVM address (default: this wallet)', size: '44', 'aria-label': 'return recipient',
+  oninput: (e: Event) => {
+    const value = (e.target as HTMLInputElement).value;
+    planRecipient.value = burnRecipient.value = value;
+  },
+});
+const planRecipient = recipientField();
+const burnRecipient = recipientField();
+const policyInput = h('textarea', { id: 'return-policy', rows: '5', 'aria-label': 'return payer policy',
+  placeholder: 'Paste the day-of-demo payer policy JSON',
+});
+// Clear policies retained by the earlier build. The current input stays in this page only.
+remove('return.policy');
+const coldRoute = h('input', { type: 'checkbox', 'aria-label': 'use continuation if ordinary no longer fits' });
+const policy = () => policyInput.value.trim() ? readPayerPolicy(policyInput.value) : undefined;
+
 const peerSelect = h('select', { 'aria-label': 'receiving tab' });
 
 const spendable = (t: TokenRecord): boolean => !t.burning && !t.pending;
 const pad = (n: bigint): string => fmtUnits(n);
 const recipientOf = (t: TokenRecord): string => {
-  const to = (t.recipient ?? recipientInput.value.trim()) || me.evmAddress;
+  const to = (t.recipient ?? planRecipient.value.trim()) || me.evmAddress;
   if (!isAddress(to)) throw new Error(`not an address: ${to}`);
   return to;
 };
@@ -359,27 +396,29 @@ const STEPS: StepDef[] = [
     run: () => verifyOne(currentOr('select a token').id),
   },
   {
-    key: 'plan', title: 'Plan return (preflight)', phase: ['minted'], when: spendable, what: 'Nothing is burned. The plug-in verifies the part\'s whole provenance, takes the burn index a from the newest verified SegmentSealed receipt, and checks that the complete future redemption fits the transaction-size limit and userGasLimit with the reserve, and that this key can pay the worst-case gas.',
-    input: () => recipientInput,
+    key: 'plan', title: 'Plan return (preflight)', phase: ['minted'], when: spendable, what: 'Nothing is burned. The plug-in verifies the part\'s lineage and the signed starting segment. The preflight prices the ordinary route first, then checks whether the calibrated continuation route fits the payer limits.',
+    input: () => planRecipient,
     run: async () => {
       const t = currentOr('select a token');
       const to = recipientOf(t);
-      const plan = await nb2.planReturn(sess(), bytesOf(t), unhex(to), (why) => fact('waiting', why));
+      const plan = await nb2.planReturn(sess(), bytesOf(t), unhex(to), (why) => fact('waiting', why), kv, policy());
       await patchToken(t.id, { returnId: `0x${hex(plan.returnId)}`, recipient: to, burnIndex: plan.a.toString() });
-      return `the preflight passes: a = ${plan.a}, gas limit ${plan.gasLimit} of ${sess().pins.userGasLimit}; room for ${plan.pMax} historical proofs`;
+      return plan.record.recovery
+        ? `Continuation admitted from segment ${plan.a} for ${plan.record.recovery.calls} calls`
+        : `Ordinary return admitted from segment ${plan.a} with room for ${plan.pMax} historical proofs`;
     },
   },
   {
-    key: 'burn', title: 'Burn for return', phase: ['minted'], when: (t) => !t.pending, what: 'The preflight runs again on fresh chain state, then the burn is certified: it signs the recipient, the amount and the index a, and its redemption ID eta is fixed from here on. The burn is irreversible.',
-    input: () => recipientInput,
-    note: (t) => (t?.phase !== 'minted' ? undefined : t.burning ? 'A burn of this token is in progress: Run resumes it with the same request.' : t.returnId ? `Planned return ${t.returnId.slice(0, 14)}… to ${t.recipient}.` : undefined),
-    run: async () => {
+    key: 'burn', title: 'Burn for return', phase: ['minted'], when: (t) => !t.pending, what: 'The preflight runs again on fresh chain state, then the burn is certified: it signs the recipient, the amount and the index a, and its redemption ID eta is fixed from here on. The wallet submits the exact request once the private backup file is saved. The certified burn is irreversible.',
+    input: () => burnRecipient,
+    note: (t) => (t?.phase !== 'minted' ? undefined : t.burning ? 'A signed burn is held. Choose a private backup file and Run to resume the same request.' : t.returnId ? `Planned return ${t.returnId.slice(0, 14)}… to ${t.recipient}.` : undefined),
+    run: async (saveBackup) => {
       const t = currentOr('select a token');
       const s = sess();
       const jr = t.returnId ? await nb2.returnRecord(s, t.returnId) : null;
       let id = t.returnId;
       if (jr === null || jr.status === 'planned') {
-        const plan = await nb2.planReturn(s, bytesOf(t), unhex(jr ? jr.recipient : recipientOf(t)), (why) => fact('waiting', why));
+        const plan = await nb2.planReturn(s, bytesOf(t), unhex(jr ? jr.recipient : recipientOf(t)), (why) => fact('waiting', why), kv, policy());
         id = `0x${hex(plan.returnId)}`;
         await patchToken(t.id, { returnId: id, recipient: `0x${hex(plan.recipient)}`, burnIndex: plan.a.toString() });
       }
@@ -388,7 +427,7 @@ const STEPS: StepDef[] = [
       await patchToken(t.id, { burning: true });
       let b: Awaited<ReturnType<typeof nb2.burn>>;
       try {
-        b = await nb2.burn(s, unhex(id!), (why) => fact('waiting', why));
+        b = await nb2.burn(s, unhex(id!), kv, need(saveBackup, 'Choose a private backup file'), (why) => fact('waiting', why), policy());
       } catch (e) {
         const r = await nb2.returnRecord(s, id!);
         if (r === null || r.status === 'planned') await patchToken(t.id, { burning: undefined });
@@ -399,12 +438,30 @@ const STEPS: StepDef[] = [
     },
   },
   {
-    key: 'redeem', title: 'Redeem', phase: ['burned'], what: 'The wallet reads one SegmentSealed log per segment since the burn\'s index, builds the gap proofs, simulates the redeem, signs and sends it, and waits for the payment\'s block to be certified (Paid event). Right after a burn the verifier may answer QuorumNotMet until the EVM chain\'s seal registry has imported the burn\'s root round: the wallet waits and builds again, nothing is sent meanwhile.',
+    key: 'redeem', title: 'Redeem', phase: ['burned'],
+    what: 'Ordinary redemption verifies segment proofs in one call. Continuation certifies bounded Progress packets, then certified gap advances if needed, and settles through redeemRecovered. Run resumes from the last certified checkpoint. Only a certified Paid receipt completes the return.',
+    input: () => h('label', {}, coldRoute, ' Use continuation if the ordinary return no longer fits'),
+    note: (t) => t?.returnProgress,
     run: async () => {
       const t = currentOr('select a token');
-      const r = await nb2.redeem(sess(), unhex(need(t.returnId, 'the token has no planned return')), (m) => fact('waiting', m));
-      if (r.state !== 'paid') throw new Error(r.state === 'pending' ? 'the redeem is sent and not confirmed yet: Run again to check it' : 'not paid: the burn is intact, Run again later');
-      await patchToken(t.id, { phase: 'redeemed', redeemTx: `0x${hex(r.txHash)}` });
+      const returnId = unhex(need(t.returnId, 'the token has no planned return'));
+      const r = await nb2.redeem(sess(), returnId, (m) => fact('waiting', m), 60, 3_000, kv, policy(), coldRoute.checked);
+      if (r.state === 'checkpoint' || r.state === 'retry') {
+        const text = r.state === 'checkpoint'
+          ? `${r.stage} certified at checkpoint ${r.sequence}. Run to advance.`
+          : 'A certified refusal cleared the last attempt. Run to retry the packet.';
+        fact('continuation transaction', `0x${hex(r.txHash)}`);
+        await patchToken(t.id, { returnProgress: text });
+        return text;
+      }
+      if (r.state === 'needs-archive') throw new Error(`Need an archive proof for 0x${hex(r.txHash)}. Add an archive RPC to the payer policy and retry.`);
+      if (r.state === 'route-blocked') throw new Error(`The ${r.route} route still has a transaction to reconcile: 0x${hex(r.txHash)}`);
+      if (r.state === 'not-paid' && r.lastFailure) {
+        const rule = r.lastFailure.error;
+        throw new Error(`Mined refusal: ${rule?.rule ?? 'unknown'}${rule?.inner ? ` (${rule.inner.rule})` : ''}`);
+      }
+      if (r.state !== 'paid') throw new Error(r.state === 'pending' ? 'Payment is pending. Run again to reconcile it.' : 'The burn is intact. Check the payer policy and retry.');
+      await patchToken(t.id, { phase: 'redeemed', returnProgress: undefined, redeemTx: `0x${hex(r.txHash)}` });
       await refreshBalances();
       return `paid ${fmtUnits(BigInt(t.amountWei))} UCT to ${t.recipient?.slice(0, 10)}… in block ${r.blockNumber}`;
     },
@@ -528,7 +585,11 @@ function stepRow(d: StepDef, t: TokenRecord | undefined): HTMLElement {
       h('span', { class: 'dot' }),
       h('strong', {}, d.title),
       d.input?.() ?? '',
-      h('button', { disabled: !enabled, onclick: () => void step(d.key, d.run) }, busy === d.key ? 'running…' : 'Run'),
+      h('button', { disabled: !enabled, onclick: () => {
+        let saveBackup: SaveReturnBackup | undefined;
+        const prepare = d.key === 'burn' ? async () => { saveBackup = await chooseReturnBackup(window as Parameters<typeof chooseReturnBackup>[0]); } : undefined;
+        void step(d.key, () => d.run(saveBackup), prepare);
+      } }, busy === d.key ? 'running…' : 'Run'),
       st ? h('span', { class: st.ok ? 'msg' : 'msg bad' }, st.text) : ''),
     h('p', { class: 'what' }, d.what),
     d.note?.(t) ? h('p', { class: 'warn' }, d.note(t)!) : '',
@@ -703,24 +764,44 @@ function flowCard(): HTMLElement {
   const t = current();
   const toks = listTokens();
   const picker = toks.length
-    ? h('select', { onchange: (e: Event) => { select((e.target as HTMLSelectElement).value); render(); } },
+    ? h('select', { disabled: !!busy, onchange: (e: Event) => { select((e.target as HTMLSelectElement).value); render(); } },
       ...toks.map((x) => h('option', { value: x.id, selected: x.id === currentId }, `${x.id.startsWith('rx-') ? 'received' : x.parent ? `part ${x.id.endsWith('.back') ? 'back' : 'keep'} of ${x.parent}` : `deposit ${x.id.slice(1)}`} · ${fmtUnits(BigInt(x.amountWei))} UCT · ${x.phase === 'received' ? 'received, not verified' : x.phase}${x.pending ? ' · transfer pending' : ''}${x.burning ? ' · burn in progress' : ''}`)))
     : h('span', { class: 'muted' }, 'none yet: deposit some UCT');
   peerSelect.replaceChildren(...[...peers.values()].map((p) => h('option', { value: p.profile }, `tab ${p.profile.toUpperCase()}`)));
   if (!peers.size) peerSelect.append(h('option', { value: '' }, 'no other tab'));
   return card('Asset flow',
     h('div', { class: 'row' }, h('span', {}, 'token: '), picker, t?.tokenId ? mono(t.tokenId) : ''),
+    h('details', {}, h('summary', {}, 'Return payer policy'), h('p', { class: 'what' }, 'Set explicit gas, byte, nonce and fee ceilings, plus optional public archive origins or /archive-rpc. The policy stays in this tab until reload. Use one payer for the full return.'), policyInput),
+    t?.returnId && (t.eta || t.burning) ? h('button', { disabled: !!busy || !ready, onclick: () => void step('return-backup', async () => {
+      const s = sess();
+      const rec = need(await nb2.returnRecord(s, t.returnId!), 'No signed return to back up');
+      const content = await encodeReturnBackup(nb2.recoveryWallet(s, kv), rec);
+      const url = URL.createObjectURL(new Blob([content], { type: 'application/json' }));
+      h('a', { href: url, download: `nb2-return-${rec.returnId.slice(2, 14)}.private.json` }).click();
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+      return 'Private return backup download started. Share it only with the chosen payer.';
+    }) }, 'Download private return backup') : '',
+    status.get('return-backup')?.text ?? '',
     h('ol', { class: 'timeline' }, ...STEPS.map((d) => stepRow(d, t))),
     status.has('arrival') || status.has('receive') ? h('div', { class: 'row' }, h('strong', {}, 'Received'),
       ...(['arrival', 'receive'] as const).map((k) => status.get(k)).map((st) => (st ? h('span', { class: st.ok ? 'msg' : 'msg bad' }, st.text) : '')), drawer('receive')) : '');
 }
 
 let trustView: HTMLElement = h('p', { class: 'muted' }, 'Not loaded.');
+async function refreshWalletTrust(agg: AggregatorClient, waitFromRound?: bigint) {
+  const held = need(trust, 'connect first');
+  const result = await refreshWalletAuthority(held, () => refreshTrust(held, agg), checkpointFeed, waitFromRound);
+  trust = result.trust;
+  if (result.historyFailed) fact('UTB refresh', 'Unavailable. Keeping authenticated history.');
+  if (result.checkpointFailed) fact('B1 checkpoint feed', 'Unavailable or invalid. Keeping the authenticated checkpoint.');
+  if (trust.origin) fact('B1 origin', `epoch ${trust.origin.usableEpoch}, root round ${trust.origin.rootRound}`);
+  return result;
+}
+
 async function showTrust(fetchNew: boolean): Promise<string> {
   const tr = need(trust, 'connect first');
-  let n = 0;
-  if (fetchNew) n = await refreshTrust(tr, new AggregatorClient(abs(settings.aggregator)));
-  const list = await entries(tr);
+  const refreshed = fetchNew ? await refreshWalletTrust(new AggregatorClient(abs(settings.aggregator))) : null;
+  const list = await entries(trust ?? tr);
   trustView = h('table', { class: 'calls' },
     h('thead', {}, h('tr', {}, ...['epoch', 'entry id', 'start round', 'end', 'members', 'quorum / total weight'].map((x) => h('th', {}, x)))),
     h('tbody', {}, ...list.map((e) => h('tr', {},
@@ -728,14 +809,20 @@ async function showTrust(fetchNew: boolean): Promise<string> {
       h('td', { class: 'num' }, e.endRound === null ? 'open' : String(e.endRound)),
       h('td', {}, h('details', {}, h('summary', {}, `${e.members.length}`), h('ul', {}, ...e.members.map((m) => h('li', {}, `${m.nodeId} · weight ${m.weight} · `, mono(m.key)))))),
       h('td', { class: 'num' }, `${e.quorum} / ${e.totalWeight}`)))));
-  return fetchNew ? `${n} new entr${n === 1 ? 'y' : 'ies'}; tip epoch ${tr.history.tip?.epoch}` : `tip epoch ${tr.history.tip?.epoch}`;
+  const held = trust ?? tr;
+  const origin = held.origin ? ` · B1 root round ${held.origin.rootRound}` : '';
+  if (!refreshed) return `tip epoch ${held.history.tip?.epoch}${origin}`;
+  const { entriesAdded, historyFailed, checkpointFailed } = refreshed;
+  const unavailable = [historyFailed && 'UTB history', checkpointFailed && 'B1 checkpoint'].filter(Boolean);
+  return `${entriesAdded} new entr${entriesAdded === 1 ? 'y' : 'ies'} · tip epoch ${held.history.tip?.epoch}${origin}`
+    + (unavailable.length ? ` · refresh unavailable for ${unavailable.join(' and ')}` : '');
 }
 
 function trustCard(): HTMLElement {
   return card('Trust base history',
     h('p', { class: 'what' }, 'GET /api/v1/trustbases: each entry is a committee (members, weights, quorum) signed by the previous one; the genesis entry is pinned by its EntryID.'),
     h('div', { class: 'row' },
-      h('button', { disabled: !trust || !!busy, onclick: () => void step('trust', () => showTrust(true)) }, 'refresh from aggregator'),
+      h('button', { disabled: !trust || !!busy, onclick: () => void step('trust', () => showTrust(true)) }, 'refresh trust'),
       status.get('trust') ? h('span', { class: status.get('trust')!.ok ? 'msg' : 'msg bad' }, status.get('trust')!.text) : ''),
     trustView, drawer('trust'));
 }
@@ -757,7 +844,7 @@ function deploymentCard(): HTMLElement {
   const r = published?.release;
   const p = published?.pins;
   const build = BUILD_NBP;
-  return card('Bridge deployment (native bridge v2)',
+  return card('Bridge deployment (NB2 v1.1)',
     h('p', { class: 'what' }, 'The deployment\'s own nb2-release.json: the pins the plug-in checks the vault against (the installation check at connect), the limits the preflight plans against, and the plug-in commit it was released with.'),
     !published || !session ? h('p', { class: 'muted' }, 'Not loaded.') : h('dl', { class: 'facts' },
       h('dt', {}, 'chain'), h('dd', {}, `${session.bridge.cfg.chainId} (block zero ${r?.package?.genesisHash ? String(r.package.genesisHash).slice(0, 14) + '…' : '?'})`),
@@ -766,7 +853,7 @@ function deploymentCard(): HTMLElement {
       h('dt', {}, 'deployment block'), h('dd', {}, p!.deploymentBlock.toString()),
       h('dt', {}, 'limits'), h('dd', {}, `tx ≤ ${p!.maxEncodedTxBytes} bytes · userGasLimit ${p!.userGasLimit} · gasReserve ${p!.gasReserve} · reserve ${p!.returnReserveSegments} segments`),
       h('dt', {}, 'plug-in commit'), h('dd', {}, published.pluginCommit ? mono(published.pluginCommit) : '—',
-        published.pluginCommit && build ? h('span', { class: published.pluginCommit === build ? 'good' : 'bad' }, published.pluginCommit === build ? ' = this build' : ` ≠ this build (${build.slice(0, 12)})`) : ''),
+        published.pluginCommit && build ? h('span', { class: published.pluginCommit === build || published.pluginCommit === COMPATIBLE_RELEASE_PLUGIN ? 'good' : 'bad' }, published.pluginCommit === build ? ' = this build' : ` · bundled build ${build.slice(0, 12)}`) : ''),
       h('dt', {}, 'files'), h('dd', {}, mono(published.url, true))),
     drawer('connect'));
 }

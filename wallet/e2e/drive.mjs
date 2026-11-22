@@ -13,8 +13,10 @@
 //   deployment         print the bridge deployment card      flow        print the asset-flow card
 //   size[:<height>] | dark   laptop viewport (default height 1500) | dark color scheme   shot:<file> PNG screenshot
 //   wait:<seconds>     sleep                                 dump        print the page text
-//   import:<0xkey>[=<mark>]  fill the import form and press replace; trustrefresh  press refresh from aggregator
+//   import:<0xkey>[=<mark>]  fill the import form and press replace; trustrefresh  press refresh trust
 //   handoff            switch this tab's handoff on (a tab announces itself only when asked)
+//   policy:<file>      use the chosen payer policy; backup-file:<path> supplies a private test file for the headless picker
+//   offline | online   block or restore network access for this tab; received-offline asserts verified ownership
 //   reload             reload the page (the journal and token records are in IndexedDB: a step resumes after it)
 //
 // Tab `pos` opens the PoS visualizer (<base>pos.html), where `dump`, `shot:<file>` and `text:<css selector>` apply.
@@ -22,7 +24,7 @@
 // Env: CHROME (browser binary), CHROME_ARGS (extra flags, space separated), PROFILE_DIR (browser profile; keep it to resume a flow, since keys and tokens live in its localStorage),
 // CDP_PORT (default 9333), CONSOLE=1 (echo the page's console), FLUSH_MS (wait before the browser is closed; default 6000).
 import { spawn } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -59,11 +61,25 @@ async function openTab(url) {
   await new Promise((r) => (ws.onopen = r));
   let id = 0;
   const pending = new Map();
+  let backupPath;
   ws.onmessage = (m) => {
     const d = JSON.parse(m.data);
     if (d.id && pending.has(d.id)) {
       pending.get(d.id)(d);
       pending.delete(d.id);
+    } else if (d.method === 'Runtime.bindingCalled' && d.params.name === 'writeDemoReturnBackup') {
+      let saved = false;
+      try {
+        writeFileSync(backupPath, d.params.payload, { mode: 0o600, flag: 'wx' });
+        saved = true;
+      } catch (error) {
+        // A retry may save the exact same signed request again.
+        if (error.code === 'EEXIST') {
+          try { saved = readFileSync(backupPath, 'utf8') === d.params.payload; }
+          catch { /* an unreadable file is not a confirmed backup */ }
+        }
+      }
+      void send('Runtime.evaluate', { expression: `window.finishDemoReturnBackup(${saved})` });
     } else if (d.method === 'Runtime.consoleAPICalled' && process.env.CONSOLE) {
       console.log('  console:', d.params.args.map((a) => a.value ?? a.description).join(' '));
     }
@@ -79,7 +95,28 @@ async function openTab(url) {
     if (r.result?.exceptionDetails) throw new Error(JSON.stringify(r.result.exceptionDetails).slice(0, 400));
     return r.result?.result?.value;
   };
-  return { ev, send, close: () => ws.close() };
+  const backupFile = async (path) => {
+    backupPath = path;
+    await send('Runtime.addBinding', { name: 'writeDemoReturnBackup' });
+    await ev(`window.showSaveFilePicker = async () => ({
+      createWritable: async () => {
+        let content;
+        return {
+          write: async (value) => { content = value; },
+          close: () => new Promise((resolve, reject) => {
+            window.finishDemoReturnBackup = (saved) => {
+              delete window.finishDemoReturnBackup;
+              if (saved) resolve();
+              else reject(new Error('Could not write the headless backup file'));
+            };
+            writeDemoReturnBackup(content);
+          }),
+          abort: async () => {},
+        };
+      },
+    })`);
+  };
+  return { ev, send, backupFile, close: () => ws.close() };
 }
 
 const tabs = {};
@@ -103,7 +140,8 @@ const stepState = (t, k) => t.ev(`(() => { const li = document.querySelector('[d
 
 let failed = false;
 for (const c of cmds) {
-  const [p, cmd, arg] = c.split(':');
+  const [p, cmd, ...rest] = c.split(':');
+  const arg = rest.join(':');
   const t = await tab(p);
   await sleep(500);
   const t0 = Date.now();
@@ -123,7 +161,7 @@ for (const c of cmds) {
       await sleep(500);
       await idle(t);
       const st = await stepState(t, arg);
-      if (/^step err/.test(st)) failed = true;
+      if (!/^step ok/.test(st)) failed = true;
       console.log(p, arg, `${Math.round((Date.now() - t0) / 1000)}s:`, st);
       break;
     }
@@ -147,7 +185,7 @@ for (const c of cmds) {
       break;
     }
     case 'trustrefresh':
-      await clickText(t, 'refresh from aggregator');
+      await clickText(t, 'refresh trust');
       await sleep(500);
       await idle(t);
       console.log(p, 'trust refresh:', await t.ev(text(card('Trust'))));
@@ -177,6 +215,45 @@ for (const c of cmds) {
       await idle(t);
       console.log(p, 'fund:', await t.ev(text(card('Identity'))));
       break;
+    case 'policy': {
+      const content = readFileSync(arg, 'utf8');
+      JSON.parse(content);
+      await t.ev(`(() => {
+        const field = document.querySelector('#return-policy');
+        field.value = ${JSON.stringify(content)};
+        field.dispatchEvent(new Event('input', { bubbles: true }));
+      })()`);
+      break;
+    }
+    case 'backup-file':
+      if (!arg) throw new Error('backup-file requires a fresh private output path');
+      await t.backupFile(arg);
+      break;
+    case 'offline':
+    case 'online': {
+      const offline = cmd === 'offline';
+      await t.send('Network.enable');
+      await t.send('Network.emulateNetworkConditions', { offline, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
+      if ((await t.ev('navigator.onLine')) === offline) throw new Error(`tab ${p}: could not set network state ${cmd}`);
+      console.log(p, cmd);
+      break;
+    }
+    case 'received-offline': {
+      const end = Date.now() + 30_000;
+      let result;
+      while (Date.now() < end) {
+        result = await t.ev(`(() => {
+          if (navigator.onLine) throw new Error('receiver must stay offline');
+          const held = [...document.querySelectorAll('select option')].find((o) => /^received.* · minted$/.test(o.textContent));
+          return held?.textContent;
+        })()`);
+        if (result) break;
+        await sleep(250);
+      }
+      if (!result) throw new Error('the receiver did not verify a transferred token while offline');
+      console.log(p, 'offline verification:', result);
+      break;
+    }
     case 'received':
       console.log(p, 'received:', await t.ev(text(`[...document.querySelectorAll('.row')].find((r) => r.querySelector('strong')?.textContent === 'Received')`)) ?? 'nothing');
       break;
