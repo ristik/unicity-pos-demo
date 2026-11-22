@@ -7,7 +7,7 @@ Browser demos for the Unicity public testnet generation `tn-public-20261122`. It
   - Registry view (`pos.html`): the validator registry (VR) with its active election module (PoA, the intermediate mode before PoS, or PoS), identities, governance queue and live config; under PoS also the committee, stakes and weighted quorum, meta-parameters, ordered seats and historical bond lots, and the trust-base (UTB) history. See [the fifth-validator demo](demo/add-validator.md).
 - `slides/`: the accompanying talk, written in Marp markdown.
 
-The target is `https://pos.staging.unicity.network/demo/`, beside `/rpc`, `/aggregator`, `/api/v1/trustbases`, `/faucet/` and `/release/`. The public VR/P85 and NB2 v1.1 packages are required to run the live demos.
+The target is `https://pos.staging.unicity.network/demo/`, beside `/rpc`, `/aggregator`, `/api/v1/trustbases`, `/faucet/` and `/release/`. The production build pins the staged VR/P85 and NB2 v1.1 release for this generation.
 
 ## Vendored packages
 

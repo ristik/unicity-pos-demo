@@ -115,7 +115,7 @@ Endpoints default to same-origin paths. The *Network settings* panel overrides t
 The bridge is opened with the plug-in's installation check: the RPC's chain ID, the vault's `config()` equal to the manifest's pinned Γ, and the vault's runtime code hash
 equal to the pinned one. A refusal (`BadDeployment`) means the manifest and the node are not the same deployment (a reset network, a wrong URL or a stale manifest), and nothing is sent.
 
-Build with the UTB genesis EntryID (`VITE_TRUST_PIN`), the SHA-256 of the authenticated release manifest (`VITE_NB2_RELEASE_SHA256`), and the PoS addresses from the same generation. The hashed manifest carries `trust.origin`. When it changes, authenticate the new release and rebuild with its new digest. Updating UTB history alone does not advance the B1 checkpoint. The `tn-public-20261122` values are pending the public packages.
+Build with the UTB genesis EntryID (`VITE_TRUST_PIN`), the SHA-256 of the authenticated release manifest (`VITE_NB2_RELEASE_SHA256`), and the PoS addresses from the same generation. The hashed manifest carries `trust.origin`. When it changes, authenticate the new release and rebuild with its new digest. Updating UTB history alone does not advance the B1 checkpoint. The production build pins the `tn-public-20261122` release and PoS addresses in `.env.production`.
 
 ### Return payer policy
 

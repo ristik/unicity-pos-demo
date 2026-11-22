@@ -314,7 +314,7 @@ ubft validator pos-publish --own-proof
 ubft validator status
 ```
 
-- **At the boundary:** watch the verified handoff and read the activated root and shard epochs. Enroll the authority for those epochs using the handbook. Public join timing awaits the rehearsal measurement.
+- **At the boundary:** watch the verified handoff and read the activated root and shard epochs. Enroll the authority for those epochs using the handbook. The private rehearsal reached five registered committee members 3m 24s after apply began.
 - **Keys** stay on your machine, one per service. The signing authority holds the EVM key and signs only typed operations its policy allows. Its keys are in memory, so **a restart means a key rotation** (`ubft validator rotate`).
 - **Leaving:** `requestRetirement` → excluded at the next election → after holds and the evidence window, `mature` → `claim` to the withdrawal address.
 - **Upgrades** are scheduled on chain (`ScheduleActivation`): <span class="plan">`status` and the `unicity_upgrade_required` metric will say when to install a release (VT-07, VT-12, planned).</span>
@@ -456,7 +456,7 @@ Continuation UI shows certified progress, gap advances and final payment when th
 
 100 UCT bond → next boundary → 4 → 5 validators
 
-The old committee signs the new UTB entry. Find the first verified EVM UC signed by the fifth root. Public join timing awaits rehearsal.
+The old committee signs the new UTB entry. Find the first verified EVM UC signed by the fifth root. Private rehearsal: **3m 24s** from apply to five confirmed members. The verified UC for block 28 included the new root’s signature.
 
 Equal weights give **f = 1** in either committee: **n ≥ 3f + 1**. The root quorum rises **3 → 4**. Two Byzantine faults require seven validators.
 
