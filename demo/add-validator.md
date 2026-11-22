@@ -7,6 +7,9 @@ announcement and [validator container quick start](https://github.com/ristik/bft
 to download, verify and load the image. Set `IMAGE` to the verified image ID
 and `PUBLIC_IP` to this operator's routed IPv4 address.
 
+For `tn-public-20261122`, the container bundle's `SHA256SUMS` digest is
+`6d79d4e297df97d4abe7bce7d1776cb3023deb7e5a4e27b5b2379dbc5dc062db`.
+
 ```bash
 docker volume create unicity-validator
 docker run --rm --network host -v unicity-validator:/data "$IMAGE" \
@@ -32,6 +35,8 @@ submit their own frozen-member proofs. Any validator can publish when all
 are recorded. After the node verifies the activation from its own root,
 show its seat, root epoch and certification activity. Equal-weight root
 quorum rises from three to four. Both committees tolerate one fault.
+The isolated rehearsal reached five members in 4m37s, including a
+node-container restart during the join.
 
 For an interrupted join, keep the authority running. Start or replace
 only the node container with the same volume and repeat `join --yes`.
