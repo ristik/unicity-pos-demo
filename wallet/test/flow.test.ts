@@ -18,7 +18,7 @@ import { IdbKv } from '../src/idb.js';
 import { burnerFrom } from '../src/keys.js';
 import * as nb2 from '../src/nb2.js';
 import { chooseReturnBackup } from '../src/return-backup.js';
-import { authenticatedOrigin } from '../src/release.js';
+import { authenticatedOrigin, checkRevision } from '../src/release.js';
 import { begin, end } from '../src/trace.js';
 import { getToken, initTokens, patchToken, putToken } from '../src/tokens.js';
 import { WORLD_GAS, key, setup, VAULT } from './world.js';
@@ -220,4 +220,11 @@ test('the B1 origin requires a pinned release digest', async () => {
   assert.deepEqual(authenticatedOrigin(release, digest), { usableEpoch: 2n, rootRound: 400n });
   assert.throws(() => authenticatedOrigin(release, 'cd'.repeat(32)), /does not match/);
   assert.throws(() => authenticatedOrigin({ ...release, release: { pins: {} } }, digest), /needs a B1 origin/);
+});
+
+test('a compatible plug-in upgrade keeps the pinned release revision', () => {
+  checkRevision('original', 'current', 'original');
+  checkRevision('current', 'current', 'original');
+  assert.throws(() => checkRevision('another', 'current', 'original'), /bridge stays closed/);
+  assert.throws(() => checkRevision('original', null, 'original'), /bridge stays closed/);
 });

@@ -1,3 +1,5 @@
+import { CHECKPOINT_PATH } from './origin.js';
+
 /**
  * What each step sent and received, for the "explain" drawer: every fetch the page makes (our JSON-RPC, the SDK's aggregator calls, the
  * trust-base pages, the lock-proof endpoint) is recorded against the step that is running, with sizes and timings, plus the step's own facts
@@ -59,10 +61,11 @@ const TRACE_PATHS = new Set(['/rpc', '/aggregator', '/api/v1/trustbases', '/fauc
   '/release/nb2-release.json', '/release/trust-base.bundle.cbor', '/release/trust-base.genesis.entryid']);
 
 /** Keep only fixed first-party route names. User-provided URLs and archive replies may contain private data. */
-function traceSource(input: string): { url: string; details: boolean } {
+function traceSource(input: string): { url: string; details: boolean; streaming?: true } {
   const base = globalThis.location?.origin ?? 'http://localhost';
   try {
     const url = new URL(input, base);
+    if (url.pathname === CHECKPOINT_PATH) return { url: url.origin === base ? CHECKPOINT_PATH : 'other endpoint', details: false, streaming: true };
     if (url.origin === base && TRACE_PATHS.has(url.pathname)) return { url: url.pathname, details: true };
     if (url.origin === base && url.pathname === '/archive-rpc') return { url: '/archive-rpc', details: false };
   } catch { /* leave unknown URLs redacted */ }
@@ -97,6 +100,10 @@ export function installFetchTrace(): void {
       const res = await orig(input, init);
       call.status = res.status;
       call.contentType = source.details ? res.headers.get('content-type') ?? '' : '';
+      if (source.streaming) {
+        call.ms = performance.now() - t0;
+        return res;
+      }
       const buf = new Uint8Array(await res.clone().arrayBuffer());
       call.resBytes = buf.length;
       call.ms = performance.now() - t0;

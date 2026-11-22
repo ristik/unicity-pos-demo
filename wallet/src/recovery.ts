@@ -7,6 +7,7 @@ import type { SaveReturnBackup } from './return-backup.js';
 import type { IdbKv } from './idb.js';
 import { abs } from './config.js';
 import type { Session } from './nb2.js';
+import { isOriginAhead } from './origin.js';
 const hx = (v: Uint8Array): string => `0x${hex(v)}`;
 interface Wallet extends Pick<Session, 'bridge' | 'trust' | 'pins' | 'signer'> {
   release: Session['published']['release'];
@@ -531,9 +532,7 @@ async function withFreshAuthority<T>(w: Wallet, f: () => Promise<T>): Promise<T>
     return await f();
   } catch (e) {
     if (!(e instanceof Nb2Error)) throw e;
-    let cause = e;
-    while (cause.inner) cause = cause.inner;
-    if (!e.retryable && cause.name !== 'SealAheadOfOrigin') throw e;
+    if (!e.retryable && !isOriginAhead(e)) throw e;
     await w.refreshAuthority();
     return f();
   }

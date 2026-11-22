@@ -72,7 +72,13 @@ async function openTab(url) {
       try {
         writeFileSync(backupPath, d.params.payload, { mode: 0o600, flag: 'wx' });
         saved = true;
-      } catch { /* the wallet must refuse to certify on write failure */ }
+      } catch (error) {
+        // A retry may save the exact same signed request again.
+        if (error.code === 'EEXIST') {
+          try { saved = readFileSync(backupPath, 'utf8') === d.params.payload; }
+          catch { /* an unreadable file is not a confirmed backup */ }
+        }
+      }
       void send('Runtime.evaluate', { expression: `window.finishDemoReturnBackup(${saved})` });
     } else if (d.method === 'Runtime.consoleAPICalled' && process.env.CONSOLE) {
       console.log('  console:', d.params.args.map((a) => a.value ?? a.description).join(' '));

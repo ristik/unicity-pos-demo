@@ -27,7 +27,7 @@ writeFileSync(join(directory, 'payer.json'), JSON.stringify(caps, encode));
 writeFileSync(join(directory, 'trust-base.bundle.cbor'), root.bundle);
 writeFileSync(join(directory, 'trust-base.genesis.entryid'), genesisEntryId);
 const digest = createHash('sha256').update(manifest).digest('hex');
-writeFileSync(join(directory, 'pins.env'), `export VITE_TRUST_PIN=${genesisEntryId}\nexport VITE_NB2_RELEASE_SHA256=${digest}\n`);
+writeFileSync(join(directory, 'pins.env'), `export VITE_TRUST_PIN=${genesisEntryId}\nexport VITE_NB2_RELEASE_SHA256=${digest}\nexport VITE_NB2_ORIGIN_CHANNEL=\n`);
 
 const funded = new Set<string>();
 createServer(async (req, res) => {

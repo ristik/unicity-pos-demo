@@ -15,7 +15,7 @@ The target is `https://pos.staging.unicity.network/demo/`, beside `/rpc`, `/aggr
 
 - `@unicitylabs/state-transition-sdk` 4.0.0-utb.c5840ef: the same tarball as `ristik/native-bridge-plugins/vendor/`. The provenance files are next to it.
 - `@unicitylabs/bridge-core` 0.1.0-bridge.2: built from `unicitynetwork/unicity-bridge` `deb2b86c`, the same tarball as in native-bridge-plugins.
-- `@unicitylabs/native-bridge-plugin` 0.1.0: `npm pack` of `ristik/native-bridge-plugins` `packages/native-bridge-plugin` at `a2ce55ffe4` (NB2 v1.1, entry `./nb2`). The wallet requires a matching commit in the release manifest’s `bridge.sources`. Its two relative `file:` dependencies are turned into peer dependencies, so the wallet has one SDK copy (the plug-in's own vendored SDK and bridge-core are byte-identical to these). `vendor/native-bridge-plugin.provenance.json` has the steps and the hashes.
+- `@unicitylabs/native-bridge-plugin` 0.1.0: built at `3f3d8208fed5` with the #1283 B1 checkpoint helper. The digest-pinned public manifest retains its compatible deployment revision `a2ce55ffe4`. The wallet uses the same vendored SDK and bridge-core copies as the plug-in. The provenance file records the build and hashes.
 
 ## Build
 

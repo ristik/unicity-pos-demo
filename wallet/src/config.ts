@@ -23,6 +23,8 @@ export interface Settings {
 
 const env = (import.meta as unknown as { env?: Record<string, string | undefined> }).env ?? {};
 
+export const ORIGIN_CHANNEL = env.VITE_NB2_ORIGIN_CHANNEL ?? '';
+export const COMPATIBLE_RELEASE_PLUGIN = env.VITE_NB2_RELEASE_PLUGIN ?? null;
 export const RELEASE_DIGEST = (env.VITE_NB2_RELEASE_SHA256 ?? '').trim().toLowerCase();
 
 export const DEFAULTS: Settings = {

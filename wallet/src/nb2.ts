@@ -27,6 +27,7 @@ import { StateId } from '@unicitylabs/state-transition-sdk/lib/api/StateId.js';
 
 import { abs, type Settings } from './config.js';
 import { eqBytes, hex, sleep, unhex } from './hex.js';
+import { isOriginAhead } from './origin.js';
 import type { Burner } from './keys.js';
 import type { Published } from './release.js';
 import { type PayerPolicy, type RecoveryResult, pollOrdinaryPayout, redeemOrdinary, recoverStep, retainTerminal, walletAdmission } from './recovery.js';
@@ -121,12 +122,17 @@ const tagged = (s: string, secret: Uint8Array): Uint8Array => sha256(new Uint8Ar
 export async function openSession(a: OpenArgs): Promise<Session> {
   const http = a.rpc ?? new HttpJsonRpc(abs(a.settings.rpc), { retries: 20, timeoutMs: 120_000, fetch: (i, init) => globalThis.fetch(i, init) });
   const aggregator = a.aggregator ?? new GatewayAggregator(abs(a.settings.aggregator));
+  let heldTrust = a.trust;
+  const refreshTrust = async (): Promise<TrustInput> => {
+    heldTrust = (await a.refreshTrust()) ?? heldTrust;
+    return heldTrust;
+  };
   const bridge = await NativeBridgeV2.open({
     pins: a.published.pins, trust: a.trust, rpc: http, aggregator, journal: a.journal,
     bridgeKey: deriveBridgeKey(tagged('unicity-demo/nb2/seed/', a.me.secret)),
-    backup: a.backup, refreshTrust: a.refreshTrust, receiptTimeoutMs: a.rpc ? 0 : 180_000, pollMs: a.rpc ? 0 : 1_000, ...(a.gas ? { gas: a.gas } : {}),
+    backup: a.backup, refreshTrust, receiptTimeoutMs: a.rpc ? 0 : 180_000, pollMs: a.rpc ? 0 : 1_000, ...(a.gas ? { gas: a.gas } : {}),
   });
-  return { bridge, trust: a.trust, published: a.published, pins: a.published.pins, signer: new LocalKeySigner(a.me.secret), owner: localOwner(a.me.secret), pub: a.me.publicKey, aggregator, backup: a.backup, refreshTrust: a.refreshTrust };
+  return { bridge, get trust() { return heldTrust; }, published: a.published, pins: a.published.pins, signer: new LocalKeySigner(a.me.secret), owner: localOwner(a.me.secret), pub: a.me.publicKey, aggregator, backup: a.backup, refreshTrust };
 }
 
 /**
@@ -169,12 +175,14 @@ export const NOT_YET = ['CompanionUnknown', 'Unconfirmed', 'NoEntryForEpoch'];
 
 /** F again while it refuses with a reason in WHICH, up to TRIES times; NOTE is told the first time and every tenth. */
 export async function retry<T>(f: () => Promise<T>, note: (reason: string) => void = () => undefined, tries = 120, ms = 2_000, which = RETRYABLE): Promise<T> {
+  const deadline = performance.now() + 180_000;
   for (let i = 0; ; i++) {
     try {
       return await f();
     } catch (e) {
-      const reason = reasonOf(e);
-      if (i >= tries || !which.includes(reason)) throw e;
+      const originAhead = isOriginAhead(e);
+      const reason = originAhead ? 'Waiting for the authenticated B1 checkpoint' : reasonOf(e);
+      if (i >= tries || (!which.includes(reason) && (!originAhead || performance.now() + ms >= deadline))) throw e;
       if (i % 10 === 0) note(reason);
       await sleep(ms);
     }
@@ -219,7 +227,7 @@ export async function mint(s: Session, intent: bigint, note?: (reason: string) =
   const p = await retry(() => s.bridge.collectDepositProof(intent), note, 120, 2_000, NOT_YET);
   fact('deposit number', p.depositNumber.toString());
   fact('receipt proof J', `${p.reason.length} bytes`);
-  const token = await s.bridge.mint(intent);
+  const token = await retry(() => s.bridge.mint(intent), note);
   const v = await s.bridge.verifyToken(token);
   fact('token id', `0x${hex(v.tokenId)}`);
   fact('token file', `${token.length} bytes`);
@@ -235,7 +243,7 @@ export function splitAmounts(total: bigint, back: bigint): bigint[] {
 
 /** Split a held token into whole parts, all to this wallet's key (the plug-in journals the split: a rerun with the same parts resumes). */
 export async function split(s: Session, token: Uint8Array, amounts: bigint[]): Promise<Uint8Array[]> {
-  const parts = await s.bridge.split(token, s.owner, amounts.map((amount) => ({ ownerKey: s.pub, amount })));
+  const parts = await retry(() => s.bridge.split(token, s.owner, amounts.map((amount) => ({ ownerKey: s.pub, amount }))));
   parts.forEach((t, i) => fact(`part ${i + 1}`, `${amounts[i]} wei, ${t.length} bytes`));
   return parts;
 }
@@ -253,7 +261,7 @@ export async function prepareTransfer(s: Session, token: Uint8Array, toKey: Uint
 export async function finishTransfer(s: Session, token: Uint8Array, p: PreparedTransfer): Promise<Uint8Array> {
   const proof = await certifyChecked(s.aggregator, unhex(p.cd));
   const out = appendTransfer(token, unhex(p.tx), proof);
-  await s.bridge.verifyToken(out);
+  await retry(() => s.bridge.verifyToken(out));
   fact('transfer', `certified; token file ${out.length} bytes`);
   return out;
 }
@@ -316,7 +324,7 @@ export async function redeem(s: Session, returnId: Uint8Array, note: (m: string)
   }
   if (rec && wallet && (rec.recovery || cold)) {
     if (!policy) throw new Error('Enter the return payer policy before continuing');
-    return recoverStep(wallet, rec, policy);
+    return retry(() => recoverStep(wallet, rec, policy), note, 30, 2_000, []);
   }
   const deadline = performance.now() + REGISTRY_LAG_MS;
   let r: ReconcileResult;
@@ -328,7 +336,8 @@ export async function redeem(s: Session, returnId: Uint8Array, note: (m: string)
       if (performance.now() >= deadline) throw refusal;
     }
     try {
-      r = rec && wallet ? await redeemOrdinary(wallet, rec, policy) : await s.bridge.submitRedeem(returnId, s.signer);
+      r = await retry(() => rec && wallet ? redeemOrdinary(wallet, rec, policy) : s.bridge.submitRedeem(returnId, s.signer),
+        note, 30, 2_000, []);
       break;
     } catch (e) {
       if (!isRegistryLag(e)) throw e;

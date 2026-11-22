@@ -11,7 +11,7 @@ import { AggregatorClient } from '@unicitylabs/state-transition-sdk/lib/api/Aggr
 import { sha256 } from '@noble/hashes/sha2.js';
 import { secp256k1 } from '@noble/curves/secp256k1.js';
 
-import { abs, DEFAULTS, loadSettings, pinOverridden, RELEASE_DIGEST, saveSettings, type Settings } from './config.js';
+import { abs, COMPATIBLE_RELEASE_PLUGIN, DEFAULTS, loadSettings, pinOverridden, ORIGIN_CHANNEL, RELEASE_DIGEST, saveSettings, type Settings } from './config.js';
 import { isAddress } from './evm.js';
 import * as faucet from './faucet.js';
 import { forgeRelabelled, forgeUnknownKeys, sealTable, verdict } from './forge.js';
@@ -23,6 +23,7 @@ import { legacyKeysOf } from './work.js';
 import { READ_ONLY_OK, VALUE_STEPS, importBlock, OperationGuard, refusal } from './guard.js';
 import { burnerFrom, loadExisting, loadOrCreateDurable, parseBackup, replaceKeyDurable, toMnemonic, type Burner } from './keys.js';
 import * as nb2 from './nb2.js';
+import { OriginFeed, originFeed, releaseCheckpoint } from './origin.js';
 import { authenticatedOrigin, checkRevision, fetchRelease, type Published } from './release.js';
 import { encodeReturnBackup, readPayerPolicy } from './recovery.js';
 import { chooseReturnBackup, type SaveReturnBackup } from './return-backup.js';
@@ -44,6 +45,7 @@ const settings: Settings = loadSettings();
 let me: Burner = loadExisting() ?? burnerFrom(secp256k1.utils.randomSecretKey());
 let trust: TrustInput | null = null;
 let published: Published | null = null;
+let checkpointFeed: OriginFeed | undefined;
 let session: nb2.Session | null = null;
 let currentId: string | null = load('current');
 let busy: string | null = null;
@@ -129,6 +131,7 @@ async function connect(): Promise<string> {
   let origin: NonNullable<TrustInput['origin']> | undefined;
   session = null;
   published = null;
+  checkpointFeed = undefined;
   ready = false;
   try {
     published = await fetchRelease(settings.release);
@@ -138,8 +141,8 @@ async function connect(): Promise<string> {
     if (published.publishedPin && published.publishedPin !== pin.toLowerCase().replace(/^0x/, '')) {
       fact('warning', `the operator publishes genesis ${published.publishedPin}, not the pinned ${pin}: this build is for another network generation`);
     }
-    checkRevision(published.pluginCommit, BUILD_NBP);
     origin = authenticatedOrigin(published, RELEASE_DIGEST);
+    checkRevision(published.pluginCommit, BUILD_NBP, COMPATIBLE_RELEASE_PLUGIN);
   } catch (e) {
     cfgError = String(e);
   }
@@ -165,9 +168,31 @@ async function connect(): Promise<string> {
     fact('bridge', cfgError);
     return `trust loaded (epoch ${trust.history.tip?.epoch}); no bridge: ${cfgError}`;
   }
+  if (ORIGIN_CHANNEL && !storeProblem) {
+    const { binding, checkpoint } = releaseCheckpoint(published!, trust, RELEASE_DIGEST);
+    checkpointFeed = new OriginFeed(trust, binding, checkpoint, originFeed(published!.url, ORIGIN_CHANNEL), kv);
+    await checkpointFeed.restore();
+    trust = checkpointFeed.current;
+    try {
+      trust = await checkpointFeed.refresh();
+    } catch (error) {
+      fact('B1 checkpoint feed', error instanceof Error ? error.message : 'unavailable');
+    }
+    fact('B1 origin', `epoch ${trust.origin!.usableEpoch}, root round ${trust.origin!.rootRound}`);
+  }
   session = await nb2.openSession({
     settings, me, trust, published: published!, journal: kv, backup: backupIntents,
-    refreshTrust: async () => { await refreshTrust(trust!, agg); return trust!; },
+    refreshTrust: async () => {
+      if (navigator.onLine === false) return trust!;
+      const appended = await refreshTrust(trust!, agg);
+      if (checkpointFeed) {
+        // A just-refreshed local origin can already satisfy the plug-in's older held view.
+        const installed = session?.trust.origin?.rootRound ?? 0n;
+        trust = await checkpointFeed.refresh(appended === 0 && checkpointFeed.checkpoint.rootRound <= installed);
+        fact('B1 origin', `epoch ${trust.origin!.usableEpoch}, root round ${trust.origin!.rootRound}`);
+      }
+      return trust!;
+    },
   });
   fact('installation check', `chain ${session.bridge.cfg.chainId}, config() = the pinned Γ, the vault's runtime code hash: passed`);
   intentMark = (await session.bridge.journal.intents())?.next ?? intentMark;
@@ -778,8 +803,11 @@ let trustView: HTMLElement = h('p', { class: 'muted' }, 'Not loaded.');
 async function showTrust(fetchNew: boolean): Promise<string> {
   const tr = need(trust, 'connect first');
   let n = 0;
-  if (fetchNew) n = await refreshTrust(tr, new AggregatorClient(abs(settings.aggregator)));
-  const list = await entries(tr);
+  if (fetchNew) {
+    n = await refreshTrust(tr, new AggregatorClient(abs(settings.aggregator)));
+    if (checkpointFeed) trust = await checkpointFeed.refresh();
+  }
+  const list = await entries(trust ?? tr);
   trustView = h('table', { class: 'calls' },
     h('thead', {}, h('tr', {}, ...['epoch', 'entry id', 'start round', 'end', 'members', 'quorum / total weight'].map((x) => h('th', {}, x)))),
     h('tbody', {}, ...list.map((e) => h('tr', {},
@@ -787,7 +815,9 @@ async function showTrust(fetchNew: boolean): Promise<string> {
       h('td', { class: 'num' }, e.endRound === null ? 'open' : String(e.endRound)),
       h('td', {}, h('details', {}, h('summary', {}, `${e.members.length}`), h('ul', {}, ...e.members.map((m) => h('li', {}, `${m.nodeId} · weight ${m.weight} · `, mono(m.key)))))),
       h('td', { class: 'num' }, `${e.quorum} / ${e.totalWeight}`)))));
-  return fetchNew ? `${n} new entr${n === 1 ? 'y' : 'ies'}; tip epoch ${tr.history.tip?.epoch}` : `tip epoch ${tr.history.tip?.epoch}`;
+  const held = trust ?? tr;
+  const origin = held.origin ? ` · B1 root round ${held.origin.rootRound}` : '';
+  return fetchNew ? `${n} new entr${n === 1 ? 'y' : 'ies'} · tip epoch ${held.history.tip?.epoch}${origin}` : `tip epoch ${held.history.tip?.epoch}${origin}`;
 }
 
 function trustCard(): HTMLElement {
@@ -825,7 +855,7 @@ function deploymentCard(): HTMLElement {
       h('dt', {}, 'deployment block'), h('dd', {}, p!.deploymentBlock.toString()),
       h('dt', {}, 'limits'), h('dd', {}, `tx ≤ ${p!.maxEncodedTxBytes} bytes · userGasLimit ${p!.userGasLimit} · gasReserve ${p!.gasReserve} · reserve ${p!.returnReserveSegments} segments`),
       h('dt', {}, 'plug-in commit'), h('dd', {}, published.pluginCommit ? mono(published.pluginCommit) : '—',
-        published.pluginCommit && build ? h('span', { class: published.pluginCommit === build ? 'good' : 'bad' }, published.pluginCommit === build ? ' = this build' : ` ≠ this build (${build.slice(0, 12)})`) : ''),
+        published.pluginCommit && build ? h('span', { class: published.pluginCommit === build || published.pluginCommit === COMPATIBLE_RELEASE_PLUGIN ? 'good' : 'bad' }, published.pluginCommit === build ? ' = this build' : ` · bundled build ${build.slice(0, 12)}`) : ''),
       h('dt', {}, 'files'), h('dd', {}, mono(published.url, true))),
     drawer('connect'));
 }
