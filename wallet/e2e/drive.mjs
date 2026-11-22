@@ -15,6 +15,8 @@
 //   wait:<seconds>     sleep                                 dump        print the page text
 //   import:<0xkey>[=<mark>]  fill the import form and press replace; trustrefresh  press refresh from aggregator
 //   handoff            switch this tab's handoff on (a tab announces itself only when asked)
+//   policy:<file>      use the chosen payer policy; authorize-backup consents to the private signed backup
+//   offline | online   block or restore network access for this tab; received-offline asserts verified ownership
 //   reload             reload the page (the journal and token records are in IndexedDB: a step resumes after it)
 //
 // Tab `pos` opens the PoS visualizer (<base>pos.html), where `dump`, `shot:<file>` and `text:<css selector>` apply.
@@ -22,7 +24,7 @@
 // Env: CHROME (browser binary), CHROME_ARGS (extra flags, space separated), PROFILE_DIR (browser profile; keep it to resume a flow, since keys and tokens live in its localStorage),
 // CDP_PORT (default 9333), CONSOLE=1 (echo the page's console), FLUSH_MS (wait before the browser is closed; default 6000).
 import { spawn } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -103,7 +105,8 @@ const stepState = (t, k) => t.ev(`(() => { const li = document.querySelector('[d
 
 let failed = false;
 for (const c of cmds) {
-  const [p, cmd, arg] = c.split(':');
+  const [p, cmd, ...rest] = c.split(':');
+  const arg = rest.join(':');
   const t = await tab(p);
   await sleep(500);
   const t0 = Date.now();
@@ -123,7 +126,7 @@ for (const c of cmds) {
       await sleep(500);
       await idle(t);
       const st = await stepState(t, arg);
-      if (/^step err/.test(st)) failed = true;
+      if (!/^step ok/.test(st)) failed = true;
       console.log(p, arg, `${Math.round((Date.now() - t0) / 1000)}s:`, st);
       break;
     }
@@ -177,6 +180,44 @@ for (const c of cmds) {
       await idle(t);
       console.log(p, 'fund:', await t.ev(text(card('Identity'))));
       break;
+    case 'policy': {
+      const content = readFileSync(arg, 'utf8');
+      JSON.parse(content);
+      await t.ev(`(() => {
+        const field = document.querySelector('#return-policy');
+        field.value = ${JSON.stringify(content)};
+        field.dispatchEvent(new Event('input', { bubbles: true }));
+      })()`);
+      break;
+    }
+    case 'authorize-backup':
+      await t.ev(`document.querySelector('input[aria-label="allow private return backup"]').checked = true`);
+      break;
+    case 'offline':
+    case 'online': {
+      const offline = cmd === 'offline';
+      await t.send('Network.enable');
+      await t.send('Network.emulateNetworkConditions', { offline, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
+      if ((await t.ev('navigator.onLine')) === offline) throw new Error(`tab ${p}: could not set network state ${cmd}`);
+      console.log(p, cmd);
+      break;
+    }
+    case 'received-offline': {
+      const end = Date.now() + 30_000;
+      let result;
+      while (Date.now() < end) {
+        result = await t.ev(`(() => {
+          if (navigator.onLine) throw new Error('receiver must stay offline');
+          const held = [...document.querySelectorAll('select option')].find((o) => /^received.* · minted$/.test(o.textContent));
+          return held?.textContent;
+        })()`);
+        if (result) break;
+        await sleep(250);
+      }
+      if (!result) throw new Error('the receiver did not verify a transferred token while offline');
+      console.log(p, 'offline verification:', result);
+      break;
+    }
     case 'received':
       console.log(p, 'received:', await t.ev(text(`[...document.querySelectorAll('.row')].find((r) => r.querySelector('strong')?.textContent === 'Received')`)) ?? 'nothing');
       break;

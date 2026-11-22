@@ -1,6 +1,6 @@
 /**
  * The PoS read surface: every view the visualizer calls, with its Solidity signature and named outputs, as deployed at contracts
- * 7b510f6b (src/p85/IP85.sol, CustodyStorage.sol, StakeCustody.sol, ElectionPolicy.sol, EligibilityReader.sol, GovernanceParams.sol,
+ * 7be725373 (src/p85/IP85.sol, CustodyStorage.sol, StakeCustody.sol, ElectionPolicy.sol, EligibilityReader.sol, GovernanceParams.sol,
  * RewardPool.sol, Evidence.sol; src/SealRegistry.sol). Public struct getters return their static members flat; a function returning a
  * struct with a dynamic member returns one tuple.
  */
@@ -47,6 +47,8 @@ export const FN = {
   lots: f('custody', 'lots(uint256)', 'uint64 id,uint64 generation,uint128 initial,uint128 remaining,uint128 penalized,uint8 category,uint16 capBps,uint32 refCount,uint64 holdRetirement,uint64 timeFloor,uint64 holdUntil,uint64 evidenceUntil,uint64 timeUntil', { src: 'CustodyStorage.sol:177' }),
   retirements: f('custody', 'retirements(uint64,uint64)', 'bool imported,uint64 pRet,uint64 tRet', { src: 'CustodyStorage.sol:207' }),
   assignments: f('custody', 'assignments(bytes32)', 'uint8 state,bytes32 lineage,uint64 rootEpoch,uint64 evmEpoch,uint64 offset,uint64 firstRound,bool offsetSet,bool hKnown,uint64 hRound,bool closed,uint64 pClose,uint64 tClose,bytes32 closureKey,bytes32 exposureDigest,bytes32 keyDigest,uint32 policyID', { src: 'IP85.sol:70' }),
+  assignmentSeatCount: f('custody', 'assignmentSeatCount(bytes32)', 'uint256', { immutable: true, src: 'StakeCustody.assignmentSeatCount' }),
+  assignmentSeat: f('custody', 'assignmentSeat(bytes32,uint256)', '((uint64 id,uint64 generation,bytes32 rootNode,bytes32 rootKeyHash,bytes32 evmNode,bytes32 evmKeyHash,address payee) binding,uint64 weight,uint64 rawWeight,bytes32 bindingHash,bytes32 exposureID,bytes32 memberDigest,uint256 lotID) seat', { immutable: true, src: 'StakeCustody.assignmentSeat' }),
   assignmentExposures: f('custody', 'assignmentExposures(bytes32)', 'bytes32[]', { immutable: true, src: 'StakeCustody.sol:778' }),
   exposures: f('custody', 'exposures(bytes32)', 'bytes32 assignmentID,uint64 id,uint64 generation,uint64 weight,uint64 rawWeight,bytes32 rootKeyHash,bytes32 evmKeyHash,address operatorPayee,bool referencesReleased,uint32 sessionLocks', { src: 'IP85.sol:55' }),
   keyOwner: f('custody', 'keyOwner(bytes32)', 'uint64 id,uint8 role', { src: 'StakeCustody.sol:769' }),

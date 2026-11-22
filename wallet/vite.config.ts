@@ -1,10 +1,10 @@
 /**
  * Built to a static bundle served at /demo/ on the network's own origin. `npm run dev` proxies the same-origin routes to upstreams
  * (defaults: ssh -L tunnels to the server's loopback ports, wallet/README.md); NB2_DIR serves a local copy of the generation's
- * bridge/nb2/public/ (nb2-release.json, the trust bundle and its pin) at /nb2/ instead.
+ * bridge/nb2/public/ (nb2-release.json, the trust bundle and its pin) at /release/ instead.
  */
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import { join, normalize } from 'node:path';
+import { isAbsolute, relative, resolve } from 'node:path';
 import { defineConfig, type Plugin, type ProxyOptions } from 'vite';
 
 const env = process.env;
@@ -19,13 +19,15 @@ const to = (target: string, strip?: string): ProxyOptions => ({
   target, changeOrigin: true, headers: { 'x-forwarded-for': '127.0.0.1' }, ...(strip ? { rewrite: (p: string) => p.slice(strip.length) || '/' } : {}),
 });
 
-/** /nb2/* from a local directory (a copy of GENERATION/bridge/nb2/public/), when NB2_DIR is set. */
+/** /release/* from a local directory (a copy of GENERATION/bridge/nb2/public/), when NB2_DIR is set. */
 function nb2Dir(dir: string): Plugin {
   // a hook that returns a function gets it called as a post-middleware hook: return nothing
   const serve = (server: { middlewares: { use: (path: string, fn: (req: { url?: string }, res: { setHeader(k: string, v: string): void; end(b: Uint8Array): void }, next: () => void) => void) => unknown } }): void => {
-    server.middlewares.use('/nb2', (req, res, next) => {
-      const file = normalize(join(dir, decodeURIComponent((req.url ?? '/').split('?')[0])));
-      if (!file.startsWith(normalize(dir)) || !existsSync(file) || !statSync(file).isFile()) return next();
+    server.middlewares.use('/release', (req, res, next) => {
+      const base = resolve(dir);
+      const file = resolve(base, '.' + decodeURIComponent((req.url ?? '/').split('?')[0]));
+      const path = relative(base, file);
+      if (path === '..' || path.startsWith('../') || isAbsolute(path) || !existsSync(file) || !statSync(file).isFile()) return next();
       res.setHeader('content-type', file.endsWith('.json') ? 'application/json' : 'application/octet-stream');
       res.end(readFileSync(file));
     });
@@ -40,7 +42,7 @@ const proxy: Record<string, ProxyOptions> = {
   '/rpc': to(gateway, '/rpc'),
   '/aggregator': to(gateway),
   '/faucet': to(faucet, '/faucet'),
-  ...(env.NB2_DIR ? {} : { '/nb2': to(nb2Files, '/nb2') }),
+  ...(env.NB2_DIR ? {} : { '/release': to(nb2Files, '/release') }),
 };
 
 export default defineConfig({

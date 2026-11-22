@@ -1,6 +1,5 @@
 /**
- * Where the PoS contracts are. Custody, election and the reward pool are the generation's `network/pos-deployment.json` (the same addresses on
- * tn-pos-staging-20261111 and tn-pos-dev-20261112: the factory deploys deterministically); the registry is the fixed system address. The reader,
+ * Where the PoS contracts are. Supply the generation's custody, election and reward pool from its deployment manifest. The VR module also discovers custody and election. The reader,
  * the evidence module and the policy source are read from the election itself. Overrides: build-time VITE_POS_* or the page's query string
  * (`?custody=0x…&election=0x…&rewardPool=0x…`). The trust pin is the wallet's (src/config.ts): there is no `?pin=`.
  */
@@ -18,16 +17,16 @@ const query = (): URLSearchParams => {
 
 const pick = (name: string, envName: string, fallback: string): string => {
   const v = query().get(name) ?? env[envName] ?? fallback;
-  if (!isAddress(v)) throw new Error(`${name}: not an address: ${v}`);
+  if (v !== '' && !isAddress(v)) throw new Error(`${name}: not an address: ${v}`);
   return v;
 };
 
 export function posAddresses(): Addresses {
   return {
     registry: pick('registry', 'VITE_POS_REGISTRY', '0xff00000000000000000000000000000000000002'),
-    custody: pick('custody', 'VITE_POS_CUSTODY', '0xc399A50Da6437b10e26AEf8DB67EB7f79f8f1D93'),
-    election: pick('election', 'VITE_POS_ELECTION', '0x051A08C2e5262403690784A4FF712809d55A53c3'),
-    rewardPool: pick('rewardPool', 'VITE_POS_REWARD_POOL', '0x0b53591d38dcc0367938D4B2738a9BFC27eE7b48'),
+    custody: pick('custody', 'VITE_POS_CUSTODY', ''),
+    election: pick('election', 'VITE_POS_ELECTION', ''),
+    rewardPool: pick('rewardPool', 'VITE_POS_REWARD_POOL', ''),
     // the validator registry, a fixed system address; the module and the governor are read from it
     vr: pick('vr', 'VITE_POS_VR', '0xff00000000000000000000000000000000000003'),
     poa: '',

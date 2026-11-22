@@ -85,12 +85,16 @@ test('deposit, mint, split, a transfer finished after a crash, return and redeem
   // return `back`: the preflight facts, the burn, the redeem
   const trace = begin();
   const recipient = new Uint8Array(20).fill(0x11);
-  const rp = await nb2.planReturn(s, back, recipient);
+  const rp = await nb2.planReturn(s, back, recipient, undefined, kv);
   assert.ok(rp.gasLimit < w.pins.userGasLimit);
   assert.equal(rp.a, 0n);
-  const b = await nb2.burn(s, rp.returnId);
+  const b = await nb2.burn(s, rp.returnId, undefined, kv);
+  const backup = JSON.parse((await kv.get(`return/backup/0x${hex(s.bridge.domain)}/0x${hex(rp.returnId)}`))!);
+  const signed = await nb2.returnRecord(s, `0x${hex(rp.returnId)}`);
+  assert.equal(backup.pending.burnRequest, signed?.burnRequest);
+  assert.equal(backup.pending.recipient, `0x${hex(recipient)}`);
   assert.ok(b.evidenceBytes > 0);
-  const paid = await nb2.redeem(s, rp.returnId, () => undefined, 5, 0);
+  const paid = await nb2.redeem(s, rp.returnId, () => undefined, 5, 0, kv);
   end(trace);
   assert.equal(paid.state, 'paid');
   const facts = new Map(trace.facts);

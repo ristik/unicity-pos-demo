@@ -55,6 +55,7 @@ export interface TokenRecord {
   burnIndex?: string;
   /** the redeem transaction that paid it */
   redeemTx?: string;
+  returnProgress?: string;
   /** the profile it came from / went to, and the receiving key */
   from?: string;
   to?: string;

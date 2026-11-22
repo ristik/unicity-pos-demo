@@ -103,3 +103,10 @@ export async function entries(trust: TrustInput): Promise<EntryView[]> {
     members: e.members.map((m) => ({ nodeId: m.nodeId, weight: m.weight, key: hex(m.sigKey) })),
   })));
 }
+
+/** Attach independently authenticated B1 authority while preserving the history's storage scope. */
+export function withOrigin(trust: TrustInput, origin: NonNullable<TrustInput['origin']>): TrustInput {
+  const next = trust.withAuthenticatedOrigin(origin);
+  namespaces.set(next, namespaces.get(trust) ?? '');
+  return next;
+}

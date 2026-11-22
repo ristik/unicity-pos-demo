@@ -1,5 +1,5 @@
 /**
- * The asset flow on native bridge v2 (protocol 9), step by step, ported from native-bridge-plugins `wallet/core.ts` (the reference wallet):
+ * The asset flow on native bridge v2.1 (NB2 v1.1), step by step, ported from native-bridge-plugins `wallet/core.ts` (the reference wallet):
  *
  *   deposit (EVM) → mint (aggregator) → split → transfer to tab B → plan return (preflight) → burn → redeem (EVM)
  *
@@ -15,7 +15,7 @@
 import { sha256 } from '@noble/hashes/sha2.js';
 import { keccak_256 } from '@noble/hashes/sha3.js';
 import {
-  AmbiguousBroadcast, HttpJsonRpc, LocalKeySigner, NativeBridgeV2, Nb2Error, WalletError, appendTransfer, certifyChecked, decodeRevert, deriveBridgeKey, evidenceOf,
+  AmbiguousBroadcast, HttpJsonRpc, LocalKeySigner, NativeBridgeV2, Nb2Error, WalletError, appendTransfer, certifyChecked, deriveBridgeKey, evidenceOf,
   freshMask, localOwner, transferRequest,
   type Aggregator, type DepositPlan, type DeploymentPins, type GasModel, type IntentsRecord, type JournalStore, type JsonRpc, type OwnerSigner, type ReconcileResult,
   type ReturnPlan, type ReturnRecord,
@@ -29,6 +29,8 @@ import { abs, type Settings } from './config.js';
 import { eqBytes, hex, sleep, unhex } from './hex.js';
 import type { Burner } from './keys.js';
 import type { Published } from './release.js';
+import { type PayerPolicy, type RecoveryResult, pollOrdinaryPayout, redeemOrdinary, recoverStep, retainTerminal, walletAdmission } from './recovery.js';
+import type { IdbKv } from './idb.js';
 import { fact } from './trace.js';
 
 // ---- the aggregator ------------------------------------------------------------------------------------------------------------------------
@@ -90,6 +92,7 @@ export interface Session {
   aggregator: Aggregator;
   /** the backup callback the session was opened with (a recovered, unbacked-up intent finishes it) */
   backup: (intents: IntentsRecord) => Promise<void>;
+  refreshTrust: OpenArgs['refreshTrust'];
 }
 
 export interface OpenArgs {
@@ -101,7 +104,7 @@ export interface OpenArgs {
   /** store the intent high-water mark with the key backup (the page shows it next to the exported key) */
   backup: (intents: IntentsRecord) => Promise<void>;
   /** append newer trust-base entries to the held history */
-  refreshTrust: () => Promise<void>;
+  refreshTrust: () => Promise<TrustInput | void>;
   /** test seams: another transport, aggregator and gas model than the gateway's, the aggregator's and the plug-in's default */
   rpc?: JsonRpc;
   aggregator?: Aggregator;
@@ -122,7 +125,7 @@ export async function openSession(a: OpenArgs): Promise<Session> {
     bridgeKey: deriveBridgeKey(tagged('unicity-demo/nb2/seed/', a.me.secret)),
     backup: a.backup, refreshTrust: a.refreshTrust, receiptTimeoutMs: a.rpc ? 0 : 180_000, pollMs: a.rpc ? 0 : 1_000, ...(a.gas ? { gas: a.gas } : {}),
   });
-  return { bridge, trust: a.trust, published: a.published, pins: a.published.pins, signer: new LocalKeySigner(a.me.secret), owner: localOwner(a.me.secret), pub: a.me.publicKey, aggregator, backup: a.backup };
+  return { bridge, trust: a.trust, published: a.published, pins: a.published.pins, signer: new LocalKeySigner(a.me.secret), owner: localOwner(a.me.secret), pub: a.me.publicKey, aggregator, backup: a.backup, refreshTrust: a.refreshTrust };
 }
 
 /**
@@ -183,8 +186,7 @@ export async function retry<T>(f: () => Promise<T>, note: (reason: string) => vo
  * or sent: the burn is intact, and the redeem is built again a moment later.
  */
 export function isRegistryLag(e: unknown): boolean {
-  if (!(e instanceof Nb2Error) || e.rule !== 'VerifierRefused' || typeof e.args?.[0] !== 'string') return false;
-  return decodeRevert(unhex(e.args[0]))?.rule === 'QuorumNotMet';
+  return e instanceof Nb2Error && e.rule === 'VerifierRefused' && e.inner?.rule === 'QuorumNotMet';
 }
 export const REGISTRY_LAG_MS = 120_000;
 
@@ -270,57 +272,74 @@ export function describePlan(s: Session, plan: ReturnPlan): void {
  * Return, step 1: plan the part's return to RECIPIENT and run the capacity preflight. Nothing is burned; a refusal (CapacityPreflight,
  * InsufficientFunds, RecipientRefused) leaves the token as it was.
  */
-export async function planReturn(s: Session, token: Uint8Array, recipient: Uint8Array, note?: (reason: string) => void): Promise<ReturnPlan> {
-  const plan = await retry(() => s.bridge.planReturn(token, recipient, s.signer.address), note, 30, 2_000, NOT_YET);
+export function recoveryWallet(s: Session, store: IdbKv) {
+  return {
+    bridge: s.bridge, pins: s.pins, signer: s.signer, release: s.published.release, store,
+    get trust() { return s.trust; },
+    async persistAuthority(next: TrustInput) {
+      await store.put(`return/authority/${hex(next.id)}`, hex(await next.history.toBundle()));
+    },
+    async refreshAuthority() { return await s.refreshTrust() ?? s.trust; },
+  };
+}
+
+export async function planReturn(s: Session, token: Uint8Array, recipient: Uint8Array, note?: (reason: string) => void, store?: IdbKv, policy?: PayerPolicy): Promise<ReturnPlan> {
+  const admission = store && walletAdmission(recoveryWallet(s, store), policy);
+  const plan = await retry(() => s.bridge.planReturn(token, recipient, s.signer.address, { admission }), note, 30, 2_000, NOT_YET);
   describePlan(s, plan);
   fact('return id', `0x${hex(plan.returnId)}`);
   return plan;
 }
 
-/** Return, step 2: burn. The preflight is repeated first by the plug-in, on fresh chain state; a burned return resumes. */
-export async function burn(s: Session, returnId: Uint8Array, note?: (reason: string) => void): Promise<{ burned: Uint8Array; eta: Uint8Array; evidenceBytes: number }> {
-  const b = await retry(() => s.bridge.burn(returnId, s.owner), note);
+/** Repeat admission, and store the private signed request before certification. */
+export async function burn(s: Session, returnId: Uint8Array, note?: (reason: string) => void, store?: IdbKv, policy?: PayerPolicy): Promise<{ burned: Uint8Array; eta: Uint8Array; evidenceBytes: number }> {
+  const recovery = store && recoveryWallet(s, store);
+  const rec = await returnRecord(s, `0x${hex(returnId)}`);
+  const b = await retry(() => s.bridge.burn(returnId, s.owner, recovery && walletAdmission(recovery, policy, true), rec ? unhex(rec.recipient) : undefined), note);
+  if (recovery) {
+    const committed = await returnRecord(s, `0x${hex(returnId)}`);
+    if (committed) await retainTerminal(recovery, committed);
+  }
   const evidenceBytes = evidenceOf(b.burned).length;
   fact('redemption ID eta', `0x${hex(b.eta)}`);
-  fact('evidence', `${evidenceBytes} bytes`);
+  fact('lineage evidence', `${evidenceBytes} bytes`);
   return { burned: b.burned, eta: b.eta, evidenceBytes };
 }
 
-/**
- * Return, step 3: redeem on the EVM. The witness (one SegmentSealed log per segment since the burn's index, with the gap proofs) is built from the
- * chain, sent and reconciled until the payment's block is certified. A QuorumNotMet from the verifier within REGISTRY_LAG_MS of the first try
- * is the registry lag of #1125: wait and build again (the burn never changes, and nothing is sent while the simulation refuses).
- */
-export async function redeem(s: Session, returnId: Uint8Array, note: (m: string) => void = () => undefined, polls = 60, pollMs = 3_000): Promise<ReconcileResult> {
-  const rec = await s.bridge.journal.ret(`0x${hex(returnId)}`);
+/** Ordinary payment retries registry lag within the deadline. Cold recovery advances one certified packet at a time. */
+export async function redeem(s: Session, returnId: Uint8Array, note: (m: string) => void = () => undefined, polls = 60, pollMs = 3_000, store?: IdbKv, policy?: PayerPolicy, cold = false): Promise<RecoveryResult | ReconcileResult> {
+  const rec = await returnRecord(s, `0x${hex(returnId)}`);
+  const wallet = store && recoveryWallet(s, store);
   if (rec) {
-    const st = await s.bridge.evm.vaultState(s.bridge.cfg.vault);
-    const owed = st.segment - BigInt(rec.a);
-    fact('burn index a', rec.a);
-    fact('vault segment now', st.segment.toString());
-    fact('gap proofs in the witness', (owed < 0n ? 0n : owed).toString());
+    const { segment } = await s.bridge.evm.vaultState(s.bridge.cfg.vault);
+    const owed = segment - BigInt(rec.a);
+    fact('gap proofs in the witness', String(owed > 0n ? owed : 0n));
   }
-  const t0 = Date.now();
+  if (rec && wallet && (rec.recovery || cold)) {
+    if (!policy) throw new Error('Enter the return payer policy before continuing');
+    return recoverStep(wallet, rec, policy);
+  }
+  const deadline = performance.now() + REGISTRY_LAG_MS;
   let r: ReconcileResult;
-  let waited = false;
+  let refusal: unknown;
   for (;;) {
+    if (refusal) {
+      const left = deadline - performance.now();
+      if (left > 0) await sleep(Math.min(left, pollMs));
+      if (performance.now() >= deadline) throw refusal;
+    }
     try {
-      r = await s.bridge.submitRedeem(returnId, s.signer);
+      r = rec && wallet ? await redeemOrdinary(wallet, rec, policy) : await s.bridge.submitRedeem(returnId, s.signer);
       break;
     } catch (e) {
       if (!isRegistryLag(e)) throw e;
-      if (Date.now() - t0 > REGISTRY_LAG_MS) {
-        throw new Error(`the deployed verifier still answers QuorumNotMet after ${REGISTRY_LAG_MS / 1000} s (bft-core#1125). Nothing was sent and the burn is intact: Run again later. If it persists, the certificate may really lack its quorum: report it`);
-      }
-      if (!waited) note('the verifier answers QuorumNotMet: the seal registry has not imported the burn\'s root round yet (#1125); waiting');
-      waited = true;
-      await sleep(pollMs);
+      if (!refusal) note('QuorumNotMet: waiting for possible seal registry lag');
+      refusal = e;
     }
   }
-  if (waited) fact('registry lag', `${Math.round((Date.now() - t0) / 1000)} s`);
   for (let i = 0; r.state === 'pending' && i < polls; i++) {
     await sleep(pollMs);
-    r = await s.bridge.reconcile(returnId);
+    r = rec && wallet ? await pollOrdinaryPayout(wallet, rec, r.txHash, policy) : await s.bridge.reconcile(returnId);
   }
   if (r.state === 'paid') {
     fact('paid in block', r.blockNumber.toString());

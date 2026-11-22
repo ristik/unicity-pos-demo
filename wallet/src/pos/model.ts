@@ -58,7 +58,7 @@ export interface Exposure {
   rootKeyHash: string;
   evmKeyHash: string;
   payee: string;
-  referencesReleased: boolean;
+  lot: Lot | null;
   binding: string;
 }
 
@@ -76,16 +76,34 @@ export interface Committee {
 
 export async function readCommittee(c: Chain, assignmentID: string, log: Log): Promise<Committee> {
   const a = o(await c.call('assignments', [assignmentID], log));
-  const ids = arr(await c.call('assignmentExposures', [assignmentID], log)).map(str);
+  const limits = o(await c.call('limits', [], log));
   const members: Exposure[] = [];
-  for (const eid of ids) {
-    const e = o(await c.call('exposures', [eid], log));
-    members.push({
-      exposureID: eid, id: big(e.id), generation: big(e.generation), weight: big(e.weight), rawWeight: big(e.rawWeight), rootKeyHash: str(e.rootKeyHash),
-      evmKeyHash: str(e.evmKeyHash), payee: str(e.operatorPayee), referencesReleased: e.referencesReleased === true, binding: signingBinding(str(e.rootKeyHash), str(e.evmKeyHash)),
-    });
+  if (big(limits.vMax) > 8n && big(limits.lMax) === 1n) {
+    const count = big(await c.call('assignmentSeatCount', [assignmentID], log));
+    if (count < 1n || count > 16n) throw new Error(`invalid ordered committee size ${count}`);
+    for (let ordinal = 0n; ordinal < count; ordinal++) {
+      const seat = o(o(await c.call('assignmentSeat', [assignmentID, ordinal], log)).seat);
+      const b = o(seat.binding);
+      const rootKeyHash = str(b.rootKeyHash);
+      const evmKeyHash = str(b.evmKeyHash);
+      const lot = await readLot(c, big(seat.lotID), log);
+      if (lot.id !== big(b.id) || lot.generation !== big(b.generation)) throw new Error(`seat ${ordinal} points to another identity's lot`);
+      members.push({
+        exposureID: str(seat.exposureID), id: big(b.id), generation: big(b.generation), weight: big(seat.weight),
+        rawWeight: big(seat.rawWeight), rootKeyHash, evmKeyHash, payee: str(b.payee),
+        binding: signingBinding(rootKeyHash, evmKeyHash), lot,
+      });
+    }
+  } else {
+    const ids = arr(await c.call('assignmentExposures', [assignmentID], log)).map(str);
+    for (const eid of ids) {
+      const e = o(await c.call('exposures', [eid], log));
+      members.push({
+        exposureID: eid, id: big(e.id), generation: big(e.generation), weight: big(e.weight), rawWeight: big(e.rawWeight), rootKeyHash: str(e.rootKeyHash),
+        evmKeyHash: str(e.evmKeyHash), payee: str(e.operatorPayee), lot: null, binding: signingBinding(str(e.rootKeyHash), str(e.evmKeyHash)),
+      });
+    }
   }
-  members.sort((x, y) => (x.id < y.id ? -1 : 1));
   return {
     assignmentID, state: big(a.state), rootEpoch: big(a.rootEpoch), evmEpoch: big(a.evmEpoch), firstRound: big(a.firstRound), offset: big(a.offset),
     closed: a.closed === true, policyID: big(a.policyID), members,
@@ -97,6 +115,8 @@ export const asMembers = (cm: Committee): Member[] => cm.members.map((m) => ({ i
 // ---- identities --------------------------------------------------------------------------------------------------------------------------------
 export interface Lot {
   lotID: bigint;
+  id: bigint;
+  generation: bigint;
   initial: bigint;
   remaining: bigint;
   penalized: bigint;
@@ -105,6 +125,15 @@ export interface Lot {
   holdUntil: bigint;
   evidenceUntil: bigint;
   timeUntil: bigint;
+}
+
+async function readLot(c: Chain, lotID: bigint, log: Log): Promise<Lot> {
+  const l = o(await c.call('lots', [lotID], log));
+  return {
+    lotID, id: big(l.id), generation: big(l.generation), initial: big(l.initial), remaining: big(l.remaining),
+    penalized: big(l.penalized), category: big(l.category), refCount: big(l.refCount), holdUntil: big(l.holdUntil),
+    evidenceUntil: big(l.evidenceUntil), timeUntil: big(l.timeUntil),
+  };
 }
 
 export interface Identity {
@@ -137,10 +166,7 @@ export async function readIdentity(c: Chain, id: bigint, log: Log): Promise<Iden
   const generation = big(p.generation);
   const lotIDs = arr(await c.call('generationLots', [id, generation], log)).map(big);
   const lots: Lot[] = [];
-  for (const lotID of lotIDs) {
-    const l = o(await c.call('lots', [lotID], log));
-    lots.push({ lotID, initial: big(l.initial), remaining: big(l.remaining), penalized: big(l.penalized), category: big(l.category), refCount: big(l.refCount), holdUntil: big(l.holdUntil), evidenceUntil: big(l.evidenceUntil), timeUntil: big(l.timeUntil) });
-  }
+  for (const lotID of lotIDs) lots.push(await readLot(c, lotID, log));
   const retirementRequested = p.retirementRequested === true;
   let retirement: Identity['retirement'] = null;
   if (retirementRequested) {

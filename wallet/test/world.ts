@@ -1,5 +1,5 @@
+// Port of native-bridge-plugins a2ce55ffe4 packages/native-bridge-plugin/test/nb2/world.ts.
 /**
- * Copied from ristik/native-bridge-plugins packages/native-bridge-plugin/test/nb2/world.ts (c9aa333), its imports pointed at the bundled lib/.
  * The offline simulator of NB2-07's tests: a trust-base history, a fake aggregator (one RSMT leaf and one certificate per request) and
  * a fake EVM gateway that executes deposits and redemptions against the in-process vault model, certifies every block (the UC of block
  * N in the companion of N+1), and answers the section 12.7 methods with the gateway's limits. The token verifier inside the vault is
@@ -71,10 +71,11 @@ export async function makeRoot(n = 4): Promise<Root> {
   ));
   const pin = await RootTrustBaseV2.decode(entry).entryId();
   const bundle = await TrustBaseBundle.encode([RootTrustBaseV2.decode(entry)]);
-  return { signers, bundle, pin, trust: await TrustInput.fromBundle(bundle, pin) };
+  return { signers, bundle, pin, trust: (await TrustInput.fromBundle(bundle, pin)).withAuthenticatedOrigin({ usableEpoch: 1n, rootRound: 1000000n }) };
 }
 
-const TR_HASH = sha(ascii('technical record'));
+const TECHNICAL_RECORD = cArr(cUint(1), cUint(1), C.encodeTextString('leader'), cBytes(new Uint8Array(32)), cBytes(new Uint8Array(32)));
+const TR_HASH = sha(TECHNICAL_RECORD);
 let round = 1000n;
 /** The certificate round counter (a snapshot restores it). */
 export const roundNow = (): bigint => round;
@@ -82,7 +83,7 @@ export const roundAtLeast = (r: bigint): void => {
   if (r > round) round = r;
 };
 
-export async function makeUc(root: Root, partition: number, stateHash: Uint8Array, blockHash: Uint8Array, timestamp: bigint): Promise<Uint8Array> {
+export async function makeUc(root: Root, partition: number, stateHash: Uint8Array, blockHash: Uint8Array, timestamp: bigint, rootEpoch = 1n): Promise<Uint8Array> {
   const ir = new InputRecord(++round, 1n, null, stateHash, new Uint8Array(), timestamp, blockHash, 0n, null);
   const conf = sha(ascii(`shard configuration ${partition}`));
   const stc = new ShardTreeCertificate(ShardId.decode(Uint8Array.of(0x80)), []);
@@ -90,7 +91,7 @@ export async function makeUc(root: Root, partition: number, stateHash: Uint8Arra
   const pkey = new Uint8Array(4);
   new DataView(pkey.buffer).setUint32(0, partition);
   const treeRoot = sha(concat(C.encodeByteString(Uint8Array.of(1)), C.encodeByteString(pkey), C.encodeByteString(sha(C.encodeByteString(shardRoot.data)))));
-  const seal = await UnicitySeal.create(NetworkId.fromId(NETWORK), round, 1n, timestamp, null, treeRoot, new Map(root.signers));
+  const seal = await UnicitySeal.create(NetworkId.fromId(NETWORK), round, rootEpoch, timestamp, null, treeRoot, new Map(root.signers));
   return new UnicityCertificate(ir, TR_HASH, conf, stc, new UnicityTreeCertificate(BigInt(partition), []), seal).toCBOR();
 }
 
@@ -102,7 +103,7 @@ export function makeConfig(root: Root, K = 4n, B = 2n): Config {
     network: NETWORK, rootGenesis: root.pin, executionGenesis, chainId: CHAIN_ID, evmPartition: EVM_PARTITION, evmShard: Uint8Array.of(0x80),
     aggregatorPartition: AGG_PARTITION, vault: VAULT, asset: ASSET_UCT, ty: deriveType(NETWORK, root.pin, executionGenesis, CHAIN_ID),
     aid: deriveCoin(NETWORK, root.pin, executionGenesis, CHAIN_ID), semanticProfileHash: sha(ascii('profile')), verifier: VERIFIER,
-    verifierCodeHash: sha(ascii('verifier code')), K, B, Qmax: (1n << 120n) - 1n,
+    verifierCodeHash: HE(ascii('verifier code')), K, B, Qmax: (1n << 120n) - 1n,
   };
 }
 
@@ -139,7 +140,7 @@ export class FakeAggregator implements Aggregator {
 
 interface Log { address: Uint8Array; topics: Uint8Array[]; data: Uint8Array }
 interface Rcpt { status: 0n | 1n; logs: Log[]; tx: Uint8Array; from: Uint8Array; revert: Uint8Array | null; gas: bigint; type: number }
-interface Block { header: Header; hash: Uint8Array; uc: Uint8Array | null; receipts: Rcpt[] }
+interface Block { header: Header; hash: Uint8Array; uc: Uint8Array | null; receipts: Rcpt[]; raws: Uint8Array[] }
 
 export interface Faults {
   /** The next N sends are included but answered with HTTP 503 (partial broadcast, #1121). */
@@ -162,10 +163,13 @@ export class FakeChain implements JsonRpc {
   public readonly vaultCode = ascii('fake vault runtime');
   public calls: string[] = [];
   public autoMine = true;
+  public certificateAuthority?: { root: Root; epoch: bigint };
+  /** Optional cold contract stand-in for wallet journal tests. */
+  public coldCall?: (vault: VaultModel, to: Uint8Array, data: Uint8Array) => Promise<Log[] | undefined>;
   private pool: Uint8Array[] = [];
 
-  private constructor(public readonly root: Root, public readonly gamma: Uint8Array, private readonly cfg: Config) {
-    this.vault = new VaultModel(gamma, { address: VAULT, chainId: CHAIN_ID, verifierCodeHash: cfg.verifierCodeHash }, TEST_PARAMS);
+  private constructor(public readonly root: Root, public readonly gamma: Uint8Array, private readonly cfg: Config, vault?: VaultModel) {
+    this.vault = vault ?? new VaultModel(gamma, { address: VAULT, chainId: CHAIN_ID, verifierCodeHash: cfg.verifierCodeHash }, TEST_PARAMS);
     this.code.set(toHex(VAULT), this.vaultCode);
   }
 
@@ -174,6 +178,17 @@ export class FakeChain implements JsonRpc {
     await c.mine([]); // genesis
     await c.mine([]); // the deployment block
     return c;
+  }
+
+  /** Independent simulator view from the same certified history. */
+  public fork(): FakeChain {
+    const copy = new FakeChain(this.root, this.gamma, this.cfg, this.vault.copy());
+    copy.blocks.push(...this.blocks.map((block) => ({ ...block })));
+    for (const [address, balance] of this.balances) copy.balances.set(address, balance);
+    for (const [address, nonce] of this.nonces) copy.nonces.set(address, nonce);
+    for (const [address, code] of this.code) copy.code.set(address, code);
+    copy.certificateAuthority = this.certificateAuthority;
+    return copy;
   }
 
   public get domain(): Uint8Array {
@@ -202,15 +217,16 @@ export class FakeChain implements JsonRpc {
     const trie = buildTrie(enc.map((e, i) => [rlpIndexKey(i), e]), null);
     const header: Header = {
       parentHash: n === 0n ? new Uint8Array(32) : this.blocks[Number(n) - 1].hash, ommersHash: EMPTY_UNCLE_HASH, beneficiary: new Uint8Array(20),
-      stateRoot: sha(concat(ascii('state'), u256(n), ...raws)), transactionsRoot: sha(concat(ascii('txs'), ...raws)), receiptsRoot: trie.root,
+      stateRoot: sha(concat(ascii('state'), u256(n), ...raws)), transactionsRoot: buildTrie(raws.map((raw, i) => [rlpIndexKey(i), raw]), null).root, receiptsRoot: trie.root,
       logsBloom: new Uint8Array(256), difficulty: 0n, number: n, gasLimit: 30_000_000n, gasUsed: cum, timestamp: 1_700_000_000n + n, extraData: new Uint8Array(),
       mixHash: new Uint8Array(32), nonce: new Uint8Array(8), baseFeePerGas: 7n, withdrawalsRoot: EMPTY_TRIE_ROOT, blobGasUsed: 0n, excessBlobGas: 0n,
       parentBeaconBlockRoot: new Uint8Array(32),
     };
     const hash = HE(encodeHeader(header));
     const parent = this.blocks[Number(n) - 1];
-    if (parent) parent.uc = await makeUc(this.root, EVM_PARTITION, parent.header.stateRoot, parent.hash, header.timestamp);
-    this.blocks.push({ header, hash, uc: null, receipts });
+    if (parent) parent.uc = await makeUc(this.certificateAuthority?.root ?? this.root, EVM_PARTITION, parent.header.stateRoot,
+      parent.hash, header.timestamp, this.certificateAuthority?.epoch);
+    this.blocks.push({ header, hash, uc: null, receipts, raws });
   }
 
   /** The verifier inside the vault: the plug-in's own relation (the Solidity verifier is NB2-05's). */
@@ -224,10 +240,12 @@ export class FakeChain implements JsonRpc {
   }
 
   /** Run a call against a vault (the real one, or a copy for a simulation); events and the payout as effects. */
-  private async run(v: VaultModel, from: Uint8Array, to: Uint8Array, value: bigint, data: Uint8Array): Promise<{ ok: true; events: VaultEvent[] } | { ok: false; revert: Uint8Array }> {
-    if (!eq(to, VAULT)) return { ok: true, events: [] };
+  private async run(v: VaultModel, from: Uint8Array, to: Uint8Array, value: bigint, data: Uint8Array): Promise<{ ok: true; events: VaultEvent[]; extra?: Log[] } | { ok: false; revert: Uint8Array }> {
     const before = v.events.length;
     try {
+      const extra = await this.coldCall?.(v, to, data);
+      if (extra !== undefined) return { ok: true, events: v.events.slice(before), extra };
+      if (!eq(to, VAULT)) return { ok: true, events: [] };
       const sel = data.subarray(0, 4);
       const word = (i: number): Uint8Array => data.subarray(4 + 32 * i, 36 + 32 * i);
       const dyn = (i: number): Uint8Array => {
@@ -264,7 +282,7 @@ export class FakeChain implements JsonRpc {
     const r = await this.run(this.vault, from, t.to, t.value, t.data);
     if (!r.ok) return { status: 0n, logs: [], tx: hash, from, revert: r.revert, gas: t.gas, type: 2 };
     this.balances.set(toHex(from), this.balanceOf(from) - t.value);
-    const logs: Log[] = [];
+    const logs: Log[] = r.extra ?? [];
     for (const e of r.events) {
       if (e.name === 'Deposited') logs.push({ address: VAULT, topics: [TOPIC.Deposited, u256(e.n)], data: depositedData(this.domain, e.amount, e.rho, e.firstOwner) });
       else if (e.name === 'Paid') {
@@ -280,6 +298,7 @@ export class FakeChain implements JsonRpc {
   private headerJson(b: Block): Record<string, unknown> {
     const x = b.header;
     return {
+      transactions: b.receipts.map((r) => h(r.tx)),
       hash: h(b.hash), parentHash: h(x.parentHash), sha3Uncles: h(x.ommersHash), miner: h(x.beneficiary), stateRoot: h(x.stateRoot), transactionsRoot: h(x.transactionsRoot),
       receiptsRoot: h(x.receiptsRoot), logsBloom: h(x.logsBloom), difficulty: q(x.difficulty), number: q(x.number), gasLimit: q(x.gasLimit), gasUsed: q(x.gasUsed),
       timestamp: q(x.timestamp), extraData: h(x.extraData), mixHash: h(x.mixHash), nonce: h(x.nonce), baseFeePerGas: q(x.baseFeePerGas),
@@ -321,6 +340,12 @@ export class FakeChain implements JsonRpc {
       case 'eth_blockNumber': return q(top.header.number);
       case 'eth_maxPriorityFeePerGas': return q(1n);
       case 'eth_getBlockByNumber': {
+        if (p[0] === 'pending' && p[1] === true) {
+          return { transactions: this.pool.map((raw) => {
+            const tx = decodeSignedTx(raw);
+            return { hash: h(tx.hash), to: h(tx.request.to), input: h(tx.request.data) };
+          }) };
+        }
         const b = p[0] === 'latest' ? top : this.blocks[Number(BigInt(p[0]))];
         return b ? this.headerJson(b) : null;
       }
@@ -328,6 +353,11 @@ export class FakeChain implements JsonRpc {
         if (p.length !== 2 || p[1] !== false) throw new RpcError(400, 0, 'eth_getBlockByHash takes [hash, false]');
         const b = this.blocks.find((x) => h(x.hash) === p[0]);
         return b ? this.headerJson(b) : null;
+      }
+      case 'eth_getRawTransactionByBlockHashAndIndex': {
+        const b = this.blocks.find((x) => h(x.hash) === p[0]);
+        const raw = b?.raws[Number(BigInt(p[1]))];
+        return raw ? h(raw) : null;
       }
       case 'eth_getTransactionReceipt': {
         const f = this.findTx(p[0]);
@@ -340,7 +370,7 @@ export class FakeChain implements JsonRpc {
       case 'unicity_getSealCompanionV1': {
         const i = this.blocks.findIndex((x) => h(x.hash) === p[0]);
         if (i <= 0) return { status: 'unknown' };
-        return { status: 'found', companion: { witnesses: [h(this.blocks[i - 1].uc!), h(ascii('technical record'))] } };
+        return { status: 'found', companion: { witnesses: [h(this.blocks[i - 1].uc!), h(TECHNICAL_RECORD)] } };
       }
       case 'eth_getLogs': {
         const f = p[0];
@@ -428,6 +458,7 @@ export async function setup() {
   const root = await makeRoot();
   const cfg = makeConfig(root);
   const chain = await FakeChain.create(root, cfg);
+  chain.code.set(toHex(cfg.verifier), ascii('verifier code'));
   const agg = new FakeAggregator(root);
   const pins = {
     gamma: chain.gamma, build: 'test' as const, vaultRuntimeCodeHash: HE(chain.vaultCode), maxEncodedTxBytes: 524_288n, userGasLimit: 60_000_000n,

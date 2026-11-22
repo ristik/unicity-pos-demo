@@ -4,7 +4,8 @@
  * pins the plug-in checks the deployment against (Γ, the vault's runtime code hash, the limits, the deployment block) and the plug-in commit it
  * was released with (`bridge.sources`).
  */
-import type { DeploymentPins } from '@unicitylabs/native-bridge-plugin/nb2';
+import { sha256 } from '@noble/hashes/sha2.js';
+import type { AuthenticatedOrigin, DeploymentPins } from '@unicitylabs/native-bridge-plugin/nb2';
 
 import { hex, unhex } from './hex.js';
 
@@ -13,7 +14,7 @@ export interface Release {
   package?: { generation?: string; chainId?: number; genesisHash?: string; validators?: number };
   bridge?: { sources?: Record<string, string> };
   deployment?: Record<string, unknown>;
-  trust?: { bundle?: string; genesisEntryId?: string };
+  trust?: { bundle?: string; genesisEntryId?: string; origin?: unknown };
   limits?: Record<string, { value?: unknown }>;
   envelope?: unknown;
   [k: string]: unknown;
@@ -48,6 +49,7 @@ export interface Published {
   /** the plug-in commit the manifest was released with */
   pluginCommit: string | null;
   url: string;
+  sha256?: string;
 }
 
 const get = async (url: string): Promise<Response> => {
@@ -59,13 +61,14 @@ const get = async (url: string): Promise<Response> => {
 /** Fetch the manifest, its trust bundle and its published pin. Files named by the manifest are relative to its URL. */
 export async function fetchRelease(url: string): Promise<Published> {
   const base = new URL(url, globalThis.location?.href ?? 'http://localhost/');
-  const release = (await (await get(base.href)).json()) as Release;
+  const raw = new Uint8Array(await (await get(base.href)).arrayBuffer());
+  const release = JSON.parse(new TextDecoder().decode(raw)) as Release;
   const pins = pinsOf(release);
   const bundleUrl = new URL(release.trust?.bundle ?? 'trust-base.bundle.cbor', base).href;
   const bundle = new Uint8Array(await (await get(bundleUrl)).arrayBuffer());
   const pinFile = await fetch(new URL('trust-base.genesis.entryid', base).href, { cache: 'no-cache' }).then((r) => (r.ok ? r.text() : '')).catch(() => '');
   const publishedPin = (pinFile.trim() || release.trust?.genesisEntryId || '').replace(/^0x/, '').toLowerCase();
-  return { release, pins, bundle, publishedPin, pluginCommit: release.bridge?.sources?.['native-bridge-plugins'] ?? null, url: base.href };
+  return { release, pins, bundle, publishedPin, sha256: hex(sha256(raw)), pluginCommit: release.bridge?.sources?.['native-bridge-plugins'] ?? null, url: base.href };
 }
 
 export const pinHex = (b: Uint8Array): string => hex(b);
@@ -74,4 +77,18 @@ export const pinHex = (b: Uint8Array): string => hex(b);
 export function checkRevision(manifest: string | null, build: string | null): void {
   if (!manifest || !build) throw new Error(`the plug-in revision cannot be compared (manifest: ${manifest ?? 'none'}, this build: ${build ?? 'none'}): the bridge stays closed`);
   if (manifest !== build) throw new Error(`the manifest was released with native-bridge-plugins ${manifest}, this build bundles ${build}: the bridge stays closed (rebuild the wallet against the manifest's revision)`);
+}
+
+/** The B1 checkpoint is deployment authority, so pin the manifest before using its origin or calibration. */
+export function authenticatedOrigin(published: Published, digest: string): AuthenticatedOrigin {
+  if (!/^[0-9a-f]{64}$/.test(digest) || published.sha256 !== digest) {
+    throw new Error('The NB2 release manifest does not match VITE_NB2_RELEASE_SHA256');
+  }
+  const origin = published.release.trust?.origin as { usableEpoch?: unknown; rootRound?: unknown } | undefined;
+  const uint = /^(0|[1-9][0-9]*)$/;
+  if (!origin || typeof origin.usableEpoch !== 'string' || !uint.test(origin.usableEpoch)
+    || typeof origin.rootRound !== 'string' || !uint.test(origin.rootRound)) {
+    throw new Error('The pinned release needs a B1 origin with decimal usableEpoch and rootRound');
+  }
+  return { usableEpoch: BigInt(origin.usableEpoch), rootRound: BigInt(origin.rootRound) };
 }
