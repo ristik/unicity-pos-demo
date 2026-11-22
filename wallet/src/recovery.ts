@@ -15,9 +15,9 @@ interface Wallet extends Pick<Session, 'bridge' | 'trust' | 'pins' | 'signer'> {
   refreshAuthority(): Promise<TrustInput>;
 }
 import {
-  AmbiguousBroadcast, FAILURE_PROOF_READS, ProofUnavailable, EvmReader, HttpJsonRpc, Nb2Error, RecoveryAuthority, RecoverySession, TOPIC, WalletError,
+  AmbiguousBroadcast, FAILURE_PROOF_READS, ProofUnavailable, EvmReader, HttpJsonRpc, Nb2Error, RecoveryAuthority, RecoverySession, RpcError, TOPIC, WalletError,
   buildParams, checkRemainingRecoveryRuns, decodeSignedTx, evidenceOf, gapProofLen, preflightRecovery, quoteRecovery, quoteRecoveryGapBatch, redeemCalldataLength, recoveryCatchUpCalls, recoveryGeneration,
-  recoveryRpcSource, signTx, type GapPrior, type RecoveryBacklog, type RecoveryCalibration,
+  recoveryRpcSource, signTx, type GapPrior, type JsonRpc, type RecoveryBacklog, type RecoveryCalibration,
   type RecoveryDeployment, type RecoveryEvent, type RecoveryLimits, type RecoveryQuote, type RecoveryReceipt,
   type RedeemShape, type ReturnAdmission, type ReturnRecord, type ReconcileResult, type TrustInput, type SendRecord, type RedeemOptions, type ReturnEvidence,
 } from '@unicitylabs/native-bridge-plugin/nb2';
@@ -504,8 +504,26 @@ function advanceCursor(cursor: Cursor, packet: Awaited<ReturnType<typeof packetO
   }
 }
 
+export function archiveRpc(url: string): JsonRpc {
+  const rpc = new HttpJsonRpc(abs(url));
+  return {
+    async call<T>(method: string, params: unknown[]): Promise<T> {
+      try {
+        return await rpc.call<T>(method, params);
+      } catch (error) {
+        if (!(error instanceof RpcError)) throw new Error('Archive RPC request failed.');
+        // The plug-in uses these message categories to split log ranges and classify pruned evidence.
+        const range = /max results|too many|exceed/i.test(error.message);
+        const pruned = /unknown block|not found|pruned/i.test(error.message);
+        const detail = [range && 'too many log results', pruned && 'pruned evidence'].filter(Boolean).join(' and ');
+        throw new RpcError(error.status, Number.isSafeInteger(error.code) ? error.code : 0, detail || 'archive request refused');
+      }
+    },
+  };
+}
+
 function readers(w: Wallet, policy: PayerPolicy): EvmReader[] {
-  return [w.bridge.evm, ...policy.archives.map((url) => new EvmReader(new HttpJsonRpc(abs(url))))];
+  return [w.bridge.evm, ...policy.archives.map((url) => new EvmReader(archiveRpc(url)))];
 }
 
 async function withFreshAuthority<T>(w: Wallet, f: () => Promise<T>): Promise<T> {
@@ -691,15 +709,19 @@ export async function recoverStep(w: Wallet, rec: ReturnRecord, policy: PayerPol
       const end = segment - start >= batch ? start + batch : segment;
       const head = cursor.gap.cursor?.head ?? bytes(rec.startHead, 32);
       let gaps: Uint8Array[] | undefined;
-      let error: unknown;
       for (const reader of archive) {
         try {
           const proofs = await segmentProofs(reader, w, rec, start, end);
           gaps = await withFreshAuthority(w, () => s.certifiedGaps(w.trust, start, head, proofs));
           break;
-        } catch (e) { error = e; }
+        } catch (error) {
+          if (error instanceof WalletError && error.reason === 'TrustInput') {
+            throw new WalletError('TrustInput', 'Could not refresh authenticated return authority.');
+          }
+          // Try another reader. Provider errors and malformed evidence can carry arbitrary text.
+        }
       }
-      if (!gaps) throw error;
+      if (!gaps) throw new WalletError('EvidenceMissing', 'No configured reader supplied certified segment history. Check the archive and retry Redeem.');
       const startHead = !cursor.gap.cursor && gaps.length > 0 ? head : undefined;
       const settlement = segment - start < batch ? await s.gaps('redeemRecovered', w.trust, cursor.prior!.receipt, cursor.gap, gaps, startHead) : undefined;
       const price = settlement && quoteRecovery(settlement.shape, release.calibration, limits);

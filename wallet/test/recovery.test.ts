@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { IDBFactory } from 'fake-indexeddb';
 import {
-  EvmReader, RecoveryAuthority, RecoverySession, TEST_PARAMS, buildHistory, decodeSignedTx,
+  EvmReader, RecoveryAuthority, RecoverySession, RpcError, TEST_PARAMS, TOPIC, buildHistory, decodeSignedTx,
   evidenceOf, recoveryRpcSource, verifyReturn, verdictAbi,
   type JsonRpc, type GasModel, type RecoveryEvent,
 } from '@unicitylabs/native-bridge-plugin/nb2';
@@ -10,11 +10,15 @@ import { DEFAULTS } from '../src/config.js';
 import { eqBytes as eq, hex, unhex } from '../src/hex.js';
 import { IdbKv } from '../src/idb.js';
 import { burnerFrom } from '../src/keys.js';
+import { begin, end, installFetchTrace, reportStepFailure } from '../src/trace.js';
 import * as nb2 from '../src/nb2.js';
 import { caps, recoveryFixture, selector } from './recovery-world.js';
 import { key } from './world.js';
 
 const hx = (b: Uint8Array) => `0x${hex(b)}`;
+
+const isSegmentLookup = (method: string, params: unknown[]): boolean =>
+  method === 'eth_getLogs' && (params[0] as { topics?: string[] }).topics?.[0] === hx(TOPIC.SegmentSealed);
 
 const gas: GasModel = { name: 'fixture without ordinary admission', depositGasLimit: () => 1_000_000n, redeemGasLimit: () => null };
 
@@ -65,8 +69,12 @@ test('continuation resumes the exact signed bytes and reaches certified Paid', a
     return undefined;
   };
   let sent = 0;
+  let rejectSegmentLogs = false;
   const interrupted: JsonRpc = {
     async call<T>(method: string, params: unknown[]): Promise<T> {
+      if (rejectSegmentLogs && isSegmentLookup(method, params)) {
+        throw new RpcError(200, -32000, 'primary-private-marker', { secret: 'primary-data' });
+      }
       const result = await rpc.call<T>(method, params);
       if (method === 'eth_sendRawTransaction' && ++sent === 1) throw new Error('browser interrupted after send');
       return result;
@@ -83,6 +91,45 @@ test('continuation resumes the exact signed bytes and reaches certified Paid', a
   assert.equal(checkpoint.state === 'checkpoint' && checkpoint.stage, 'Complete');
   assert.equal(sent, 1);
   assert.equal((await read()).pending, undefined);
+  // Force the real recovery step to ask all readers for the next certified segment.
+  const evm = browser.bridge.evm;
+  const state = evm.vaultState.bind(evm);
+  const fetchBefore = globalThis.fetch;
+  const errorBefore = console.error;
+  const logged: unknown[][] = [];
+  let failedArchiveCalls = 0;
+  rejectSegmentLogs = true;
+  evm.vaultState = async (vault) => ({ ...await state(vault), segment: 1n });
+  globalThis.fetch = async (_input, init) => {
+    const { id, method, params } = JSON.parse(String(init?.body));
+    if (isSegmentLookup(method, params)) {
+      failedArchiveCalls++;
+      return Response.json({ jsonrpc: '2.0', id, error: { code: -32000, message: 'archive-private-marker', data: { secret: 'archive-data' } } });
+    }
+    return Response.json({ jsonrpc: '2.0', id, result: await rpc.call(method, params) });
+  };
+  installFetchTrace();
+  console.error = (...args: unknown[]) => { logged.push(args); };
+  const trace = begin();
+  let status: ReturnType<typeof reportStepFailure> | undefined;
+  try {
+    await nb2.redeem(browser, eligible.returnId, undefined, 0, 0, kv, { ...caps, archives: ['/archive-rpc'] });
+  } catch (error) {
+    status = reportStepFailure(error);
+  } finally {
+    end(trace);
+    evm.vaultState = state;
+    globalThis.fetch = fetchBefore;
+    console.error = errorBefore;
+    rejectSegmentLogs = false;
+  }
+  assert.equal(failedArchiveCalls, 1);
+  assert.equal(status?.ok, false);
+  assert.match(status!.text, /No configured reader supplied certified segment history/);
+  assert.deepEqual(trace.facts.at(-1), ['error', status!.text]);
+  assert.deepEqual(logged, [[status!.text]]);
+  assert.doesNotMatch(JSON.stringify({ status, trace, logged }), /private-marker|archive-data|primary-data/);
+  assert.equal(sent, 1, 'failed archive lookups must leave the continuation unsigned');
   assert.equal((await redeem()).state, 'paid');
   assert.equal(sent, 2);
   assert.equal(chain.vault.events.filter((event) => event.name === 'Paid').length, 1);

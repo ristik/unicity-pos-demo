@@ -28,7 +28,7 @@ import { encodeReturnBackup, readPayerPolicy } from './recovery.js';
 import { chooseReturnBackup, type SaveReturnBackup } from './return-backup.js';
 import { load, loadJson, PROFILE, remove, save, saveJson } from './store.js';
 import { getToken, initTokens, listTokens, patchToken, putToken, putTokens, tokensOpen, type Phase, type TokenRecord } from './tokens.js';
-import { begin, end, fact, installFetchTrace, type Trace } from './trace.js';
+import { begin, end, fact, installFetchTrace, reportStepFailure, type Trace } from './trace.js';
 import { bootstrapTrust, entries, refreshTrust, withOrigin } from './trust.js';
 import { copyable, explain, h, mono } from './ui.js';
 
@@ -105,10 +105,7 @@ async function step(key: string, fn: () => Promise<string | void>, prepare?: () 
     const msg = await fn();
     status.set(key, { ok: true, text: msg ?? 'done' });
   } catch (e) {
-    const text = e instanceof Error ? `${e.name === 'Error' ? '' : `${e.name}: `}${e.message}` : String(e);
-    fact('error', text);
-    status.set(key, { ok: false, text });
-    console.error(e);
+    status.set(key, reportStepFailure(e));
   } finally {
     end(t);
     traces.set(key, t);

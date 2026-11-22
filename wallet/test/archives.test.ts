@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { readPayerPolicy } from '../src/recovery.js';
+import { archiveRpc, readPayerPolicy } from '../src/recovery.js';
 import { begin, end, installFetchTrace } from '../src/trace.js';
 
 const readArchives = (archives: string[]) => readPayerPolicy(JSON.stringify({
@@ -16,6 +16,19 @@ test('archive policy accepts public origins and a fixed same-origin proxy', () =
       error.message.includes('public HTTPS origin') && !error.message.includes(forbidden));
   }
   assert.throws(() => readPayerPolicy('{invalid key-secret'), /^Error: Invalid return payer policy JSON\.$/);
+});
+
+test('archive RPC failures retain stable classifications and discard provider text and data', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () => Response.json({
+    error: { code: -32000, message: 'too many results and unknown block: provider-marker', data: 'private-value' },
+  }));
+  await assert.rejects(archiveRpc('/archive-rpc').call('eth_getLogs', []), (error: Error & { code?: number; data?: unknown }) => {
+    assert.equal(error.code, -32000);
+    assert.match(error.message, /too many log results and pruned evidence/);
+    assert.doesNotMatch(error.message, /provider-marker|private-value/);
+    assert.equal(error.data, undefined);
+    return true;
+  });
 });
 
 test('archive traces omit endpoint, payload and response credentials', async () => {

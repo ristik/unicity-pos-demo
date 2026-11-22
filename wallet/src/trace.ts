@@ -39,6 +39,13 @@ export function fact(k: string, v: string | number | bigint): void {
   current?.facts.push([k, String(v)]);
 }
 
+export function reportStepFailure(error: unknown): { ok: false; text: string } {
+  const text = error instanceof Error ? `${error.name === 'Error' ? '' : `${error.name}: `}${error.message}` : String(error);
+  fact('error', text);
+  console.error(text);
+  return { ok: false, text };
+}
+
 const trim = (s: string, n = 240): string => (s.length > n ? `${s.slice(0, n)}… (${s.length} chars)` : s);
 
 function bodyLength(b: BodyInit | null | undefined): number {
