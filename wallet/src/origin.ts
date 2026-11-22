@@ -10,7 +10,7 @@ const utf8 = new TextEncoder();
 const REFRESH_WAIT_MS = 80_000;
 const REFRESH_INTERVAL_MS = 4_000;
 
-type Store = Pick<IdbKv, 'get' | 'put'>;
+type Store = Pick<IdbKv, 'get' | 'put' | 'delete'>;
 
 /** A certificate ahead of the installed B1 origin can become eligible after the operator publishes its next checkpoint. */
 export function isOriginAhead(error: unknown): boolean {
@@ -91,9 +91,17 @@ export class OriginFeed {
   get current(): TrustInput { return this.trust; }
   get checkpoint(): Nb2OriginCheckpoint { return this.held; }
 
-  async restore(): Promise<void> {
+  /** A corrupt cache cannot replace the release checkpoint or block a fetch from the authenticated feed. */
+  async restore(): Promise<boolean> {
     const saved = await this.store.get(this.key);
-    if (saved) await this.accept(utf8.encode(saved), false);
+    if (saved === null) return true;
+    try {
+      await this.accept(utf8.encode(saved), false);
+      return true;
+    } catch {
+      await this.store.delete(this.key);
+      return false;
+    }
   }
 
   private async accept(bytes: Uint8Array, persist: boolean): Promise<void> {

@@ -13,7 +13,7 @@
 //   deployment         print the bridge deployment card      flow        print the asset-flow card
 //   size[:<height>] | dark   laptop viewport (default height 1500) | dark color scheme   shot:<file> PNG screenshot
 //   wait:<seconds>     sleep                                 dump        print the page text
-//   import:<0xkey>[=<mark>]  fill the import form and press replace; trustrefresh  press refresh from aggregator
+//   import:<0xkey>[=<mark>]  fill the import form and press replace; trustrefresh  press refresh trust
 //   handoff            switch this tab's handoff on (a tab announces itself only when asked)
 //   policy:<file>      use the chosen payer policy; backup-file:<path> supplies a private test file for the headless picker
 //   offline | online   block or restore network access for this tab; received-offline asserts verified ownership
@@ -185,7 +185,7 @@ for (const c of cmds) {
       break;
     }
     case 'trustrefresh':
-      await clickText(t, 'refresh from aggregator');
+      await clickText(t, 'refresh trust');
       await sleep(500);
       await idle(t);
       console.log(p, 'trust refresh:', await t.ev(text(card('Trust'))));

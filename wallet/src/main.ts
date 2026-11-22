@@ -30,7 +30,7 @@ import { chooseReturnBackup, type SaveReturnBackup } from './return-backup.js';
 import { load, loadJson, PROFILE, remove, save, saveJson } from './store.js';
 import { getToken, initTokens, listTokens, patchToken, putToken, putTokens, tokensOpen, type Phase, type TokenRecord } from './tokens.js';
 import { begin, end, fact, installFetchTrace, reportStepFailure, type Trace } from './trace.js';
-import { bootstrapTrust, entries, refreshTrust, withOrigin } from './trust.js';
+import { bootstrapTrust, entries, refreshTrust, refreshWalletAuthority, withOrigin } from './trust.js';
 import { copyable, explain, h, mono } from './ui.js';
 
 installFetchTrace();
@@ -155,42 +155,30 @@ async function connect(): Promise<string> {
       for (const entry of held.history.entries) await trust.history.append(entry);
     }
   }
-  // a stored or shipped history may be epochs behind (the network hands off every few minutes): catch up before anything verifies against it
-  try {
-    const n = await refreshTrust(trust, agg);
-    if (n > 0) fact('trust refresh', `${n} entries appended to the held history`);
-  } catch (e) {
-    fact('trust refresh', `failed, keeping the held history: ${String(e)}`);
-  }
   fact('trust pin', `${pin} (from ${pinOverridden(settings) ? 'the Network settings: a developer override' : 'the build'})`);
-  fact('trust history', `${r.source}, epochs ${trust.history.entries[0].epoch}..${trust.history.tip?.epoch}`);
   if (cfgError) {
+    await refreshWalletTrust(agg);
     fact('bridge', cfgError);
     return `trust loaded (epoch ${trust.history.tip?.epoch}); no bridge: ${cfgError}`;
   }
   if (ORIGIN_CHANNEL && !storeProblem) {
     const { binding, checkpoint } = releaseCheckpoint(published!, trust, RELEASE_DIGEST);
     checkpointFeed = new OriginFeed(trust, binding, checkpoint, originFeed(published!.url, ORIGIN_CHANNEL), kv);
-    await checkpointFeed.restore();
-    trust = checkpointFeed.current;
     try {
-      trust = await checkpointFeed.refresh();
-    } catch (error) {
-      fact('B1 checkpoint feed', error instanceof Error ? error.message : 'unavailable');
+      if (!await checkpointFeed.restore()) fact('B1 checkpoint cache', 'Invalid cached checkpoint discarded.');
+    } catch {
+      fact('B1 checkpoint cache', 'Could not read or clear the cached checkpoint. Checking the authenticated feed.');
     }
-    fact('B1 origin', `epoch ${trust.origin!.usableEpoch}, root round ${trust.origin!.rootRound}`);
+    trust = checkpointFeed.current;
   }
+  // Refresh both authorities before opening, keeping whichever authenticated update is available.
+  await refreshWalletTrust(agg);
+  fact('trust history', `${r.source}, epochs ${trust.history.entries[0].epoch}..${trust.history.tip?.epoch}`);
   session = await nb2.openSession({
     settings, me, trust, published: published!, journal: kv, backup: backupIntents,
     refreshTrust: async () => {
       if (navigator.onLine === false) return trust!;
-      const appended = await refreshTrust(trust!, agg);
-      if (checkpointFeed) {
-        // A just-refreshed local origin can already satisfy the plug-in's older held view.
-        const installed = session?.trust.origin?.rootRound ?? 0n;
-        trust = await checkpointFeed.refresh(appended === 0 && checkpointFeed.checkpoint.rootRound <= installed);
-        fact('B1 origin', `epoch ${trust.origin!.usableEpoch}, root round ${trust.origin!.rootRound}`);
-      }
+      await refreshWalletTrust(agg, session?.trust.origin?.rootRound);
       return trust!;
     },
   });
@@ -800,13 +788,19 @@ function flowCard(): HTMLElement {
 }
 
 let trustView: HTMLElement = h('p', { class: 'muted' }, 'Not loaded.');
+async function refreshWalletTrust(agg: AggregatorClient, waitFromRound?: bigint) {
+  const held = need(trust, 'connect first');
+  const result = await refreshWalletAuthority(held, () => refreshTrust(held, agg), checkpointFeed, waitFromRound);
+  trust = result.trust;
+  if (result.historyFailed) fact('UTB refresh', 'Unavailable. Keeping authenticated history.');
+  if (result.checkpointFailed) fact('B1 checkpoint feed', 'Unavailable or invalid. Keeping the authenticated checkpoint.');
+  if (trust.origin) fact('B1 origin', `epoch ${trust.origin.usableEpoch}, root round ${trust.origin.rootRound}`);
+  return result;
+}
+
 async function showTrust(fetchNew: boolean): Promise<string> {
   const tr = need(trust, 'connect first');
-  let n = 0;
-  if (fetchNew) {
-    n = await refreshTrust(tr, new AggregatorClient(abs(settings.aggregator)));
-    if (checkpointFeed) trust = await checkpointFeed.refresh();
-  }
+  const refreshed = fetchNew ? await refreshWalletTrust(new AggregatorClient(abs(settings.aggregator))) : null;
   const list = await entries(trust ?? tr);
   trustView = h('table', { class: 'calls' },
     h('thead', {}, h('tr', {}, ...['epoch', 'entry id', 'start round', 'end', 'members', 'quorum / total weight'].map((x) => h('th', {}, x)))),
@@ -817,14 +811,18 @@ async function showTrust(fetchNew: boolean): Promise<string> {
       h('td', { class: 'num' }, `${e.quorum} / ${e.totalWeight}`)))));
   const held = trust ?? tr;
   const origin = held.origin ? ` · B1 root round ${held.origin.rootRound}` : '';
-  return fetchNew ? `${n} new entr${n === 1 ? 'y' : 'ies'} · tip epoch ${held.history.tip?.epoch}${origin}` : `tip epoch ${held.history.tip?.epoch}${origin}`;
+  if (!refreshed) return `tip epoch ${held.history.tip?.epoch}${origin}`;
+  const { entriesAdded, historyFailed, checkpointFailed } = refreshed;
+  const unavailable = [historyFailed && 'UTB history', checkpointFailed && 'B1 checkpoint'].filter(Boolean);
+  return `${entriesAdded} new entr${entriesAdded === 1 ? 'y' : 'ies'} · tip epoch ${held.history.tip?.epoch}${origin}`
+    + (unavailable.length ? ` · refresh unavailable for ${unavailable.join(' and ')}` : '');
 }
 
 function trustCard(): HTMLElement {
   return card('Trust base history',
     h('p', { class: 'what' }, 'GET /api/v1/trustbases: each entry is a committee (members, weights, quorum) signed by the previous one; the genesis entry is pinned by its EntryID.'),
     h('div', { class: 'row' },
-      h('button', { disabled: !trust || !!busy, onclick: () => void step('trust', () => showTrust(true)) }, 'refresh from aggregator'),
+      h('button', { disabled: !trust || !!busy, onclick: () => void step('trust', () => showTrust(true)) }, 'refresh trust'),
       status.get('trust') ? h('span', { class: status.get('trust')!.ok ? 'msg' : 'msg bad' }, status.get('trust')!.text) : ''),
     trustView, drawer('trust'));
 }

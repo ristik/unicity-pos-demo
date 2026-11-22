@@ -6,6 +6,7 @@ import { HashAlgorithm } from '@unicitylabs/state-transition-sdk/lib/crypto/hash
 import { CborMap } from '@unicitylabs/state-transition-sdk/lib/serialization/cbor/CborMap.js';
 import { CborMapEntry } from '@unicitylabs/state-transition-sdk/lib/serialization/cbor/CborMapEntry.js';
 import { CborSerializer as C } from '@unicitylabs/state-transition-sdk/lib/serialization/cbor/CborSerializer.js';
+import { refreshWalletAuthority } from '../src/trust.js';
 import { Chain } from '../src/pos/chain.js';
 import { posAddresses } from '../src/pos/config.js';
 import { fifthValidator, JoinEvidence } from '../src/pos/join.js';
@@ -28,7 +29,17 @@ test('a pinned 4 → 5 handoff locates the first UC with a valid new-member sign
   const hash = await new DataHasher(HashAlgorithm.SHA256).update(entry(C.encodeNull())).digest();
   const signatures = await Promise.all(old.signers.slice(0, 3).map(async ([id, key]) =>
     new CborMapEntry(C.encodeTextString(id), C.encodeByteString((await key.sign(hash)).encode()))));
-  await old.trust.history.append(RootTrustBaseV2.decode(entry(C.encodeMap(new CborMap(signatures)))));
+  const held = old.trust;
+  const next = RootTrustBaseV2.decode(entry(C.encodeMap(new CborMap(signatures))));
+  const refreshed = await refreshWalletAuthority(held, async () => held.history.append(next), {
+    current: held,
+    refresh: async () => { throw new Error('B1 checkpoint HTTP 503'); },
+  }, held.origin?.rootRound);
+  assert.equal(refreshed.entriesAdded, 1);
+  assert.equal(refreshed.historyFailed, false);
+  assert.equal(refreshed.checkpointFailed, true);
+  assert.equal(refreshed.trust.history.tip?.epoch, 2n);
+  assert.deepEqual(refreshed.trust.origin, held.origin);
 
   // The first UC in epoch two can reach quorum with just the four incumbents.
   chain.certificateAuthority = { root: old, epoch: 2n };

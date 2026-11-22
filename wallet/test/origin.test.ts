@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { MAX_NB2_ORIGIN_BYTES } from '@unicitylabs/native-bridge-plugin/nb2';
 import { OriginFeed, originFeed, readCheckpointBytes } from '../src/origin.js';
+import { refreshWalletAuthority } from '../src/trust.js';
 import { begin, end, installFetchTrace } from '../src/trace.js';
 import { makeRoot } from './world.js';
 
@@ -27,6 +28,7 @@ test('the wallet persists only accepted monotonic checkpoints and restores them 
       assert.equal(key, `return/origin/${binding.releaseSha256}`);
       return saved;
     },
+    delete: async () => { saved = null; },
     put: async (key: string, record: string) => {
       assert.equal(key, `return/origin/${binding.releaseSha256}`);
       if (failWrite) throw new Error('durable write failed');
@@ -57,6 +59,26 @@ test('the wallet persists only accepted monotonic checkpoints and restores them 
   offered = { ...document, releaseSha256: 'ef'.repeat(32) };
   await assert.rejects(reopened.refresh(), /different release/);
   assert.equal(saved, durable);
+});
+
+test('an invalid cached checkpoint is discarded and the authenticated feed can recover Connect', async (t) => {
+  const trust = (await makeRoot()).trust.withAuthenticatedOrigin(initial);
+  let saved: string | null = '{"schema":"invalid"}';
+  const store = {
+    get: async () => saved,
+    put: async (_key: string, value: string) => { saved = value; },
+    delete: async () => { saved = null; },
+  };
+  const feed = new OriginFeed(trust, binding, initial, url, store);
+  assert.equal(await feed.restore(), false);
+  assert.equal(saved, null);
+  assert.equal(feed.current.origin?.rootRound, initial.rootRound);
+  t.mock.method(globalThis, 'fetch', async () => Response.json(document));
+  const refreshed = await refreshWalletAuthority(trust, async () => { throw new Error('UTB HTTP 503'); }, feed, initial.rootRound);
+  assert.equal(refreshed.historyFailed, true);
+  assert.equal(refreshed.checkpointFailed, false);
+  assert.equal(refreshed.trust.origin?.rootRound, 133n);
+  assert.equal(JSON.parse(saved!).rootRound, '133');
 });
 
 test('checkpoint transport enforces the decoded byte cap before buffering an oversized chunk', async (t) => {

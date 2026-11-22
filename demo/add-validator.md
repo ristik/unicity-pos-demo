@@ -17,6 +17,7 @@ export UBFT_HOME="$HOME/validator"
 cd "$UBFT_HOME"
 UBFT=$UBFT_HOME/release/ubft
 RPC_URL=http://127.0.0.1:18485
+ROOT_RPC=http://127.0.0.1:25852
 CHAIN_ID=$(jq -er .config.chainId release/genesis.json)
 CUSTODY=$(jq -er .custody release/deployment.json)
 ELECTION=$(jq -er .election release/deployment.json)
@@ -51,7 +52,7 @@ cast call --rpc-url "$RPC_URL" "$ELECTION" 'frozenMembers(bytes32)((uint64,uint6
 The relay operator gathers the frozen members’ proofs, publishes the result in VR, and the incumbents run the packaged activation. After the joining root confirms the activated epochs, enroll and advance the authority using the verified handoff bundle, then restart the joining shard with its existing home and fresh session credential. [Validator handbook](https://github.com/ristik/bft-core/blob/e54b522b08d7418408f3f947ba4217f7e4097c76/docs/operations/validator-handbook.md#4-apply-stake-and-join)
 
 ```bash
-"$UBFT" q3 shard-conf --root-rpc http://127.0.0.1:26852 --epoch "$ACTIVATED_SHARD_EPOCH" --out authority/activated-shard.json
+"$UBFT" q3 shard-conf --root-rpc "$ROOT_RPC" --epoch "$ACTIVATED_SHARD_EPOCH" --out authority/activated-shard.json
 "$UBFT" signing-authority complete-enrollment "${AUTH[@]}" --shard-conf authority/activated-shard.json
 "$UBFT" signing-authority advance-with-proof "${AUTH[@]}" --client-socket authority/client.sock \
   --out authority/client.cred --proof "authority/activation-$ACTIVATED_ROOT_EPOCH.cbor"
