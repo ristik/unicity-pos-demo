@@ -46,6 +46,29 @@ async function openWith(w: Awaited<ReturnType<typeof world>>, backup: (i: { next
   return (await w.open(new IdbKv('a', w.factory), backup)).s;
 }
 
+test('Mint tries one recovery lookup after its ordinary origin catch-up window', async (t) => {
+  const w = await world();
+  const { s } = await w.open();
+  const { intent } = await nb2.planDeposit(s, 8n);
+  await nb2.sendDeposit(s, intent);
+  const mint = s.bridge.mint.bind(s.bridge);
+  let now = 0;
+  let attempts = 0;
+  t.mock.method(performance, 'now', () => now);
+  t.mock.method(s.bridge, 'mint', async (i: bigint, options?: { recoverProof?: boolean }) => {
+    assert.equal(i, intent);
+    if (++attempts === 1) {
+      assert.equal(options, undefined);
+      now += 180_000;
+      throw new Nb2Error('SealEpoch', 'seal exceeds the authenticated B1 origin');
+    }
+    assert.deepEqual(options, { recoverProof: true });
+    return mint(i, options);
+  });
+  assert.equal((await nb2.mint(s, intent)).amount, 8n);
+  assert.equal(attempts, 2);
+});
+
 test('deposit, mint, split, a transfer finished after a crash, return and redeem', async () => {
   const w = await world();
   const { s, kv } = await w.open();
