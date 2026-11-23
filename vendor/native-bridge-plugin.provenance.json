@@ -1,13 +1,13 @@
 {
   "repository": "https://github.com/ristik/native-bridge-plugins.git",
-  "commit": "3f3d8208fed52c26b80bf5ddbc284d3027feb323",
-  "branch": "main",
+  "commit": "ce0a5d1c8e65351aa7e53a5b9b127e22fa59e5ff",
+  "branch": "fix/nb2-retain-mint-proof",
   "directory": "packages/native-bridge-plugin",
   "name": "@unicitylabs/native-bridge-plugin",
   "version": "0.1.0",
   "tarball": "unicitylabs-native-bridge-plugin-0.1.0.tgz",
-  "sha256": "281312d13c9ac04e3af87d9a390348f605a4b057d5de7864c7888ce332668b85",
-  "integrity": "sha512-ayDwXjh2sloEjjlGx9q/jP/3e4o/XwCAkPLi6s2fSwxyBTLW9GFselEcQqBhSVWKBqchKhox+QbZB1389HH7Ag==",
+  "sha256": "3c082d9931fcc29b2b5fca9af080f5891954097751f3676f70bcaac871388857",
+  "integrity": "sha512-c3N4oeNH/FQC+4P/74K/BusjaHkxhNFy+AJbOnX81SykQFOMhY0+L0cTiS0HqAU9SVzmZWAqH6XU+Fy8toa5TA==",
   "build": [
     "git archive <commit> | tar -x",
     "npm install --ignore-scripts (repo root, with its vendored SDK and bridge-core tarballs)",
@@ -15,6 +15,6 @@
     "package.json: drop the file: dependencies on @unicitylabs/bridge-core and @unicitylabs/state-transition-sdk and declare both as peerDependencies \"*\" (written with JSON.stringify(p, null, 2), no trailing newline), so the wallet's own vendored SDK and bridge-core are used",
     "npm pack --ignore-scripts"
   ],
-  "verified": "2026-11-22: NB2 v1.1 with the #1283 checkpoint helper and #89 origin response size cap. The SDK and bridge-core tarballs match the demo copies byte for byte.",
+  "verified": "2026-11-23: NB2 v1.1 with durable certification proof retention. The SDK and bridge-core tarballs match the demo copies byte for byte.",
   "notes": "The independently digest-pinned public deployment retains its explicitly compatible a2ce55ffe4 release revision."
 }
