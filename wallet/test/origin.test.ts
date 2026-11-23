@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { AggregatorClient } from '@unicitylabs/state-transition-sdk/lib/api/AggregatorClient.js';
 import { MAX_NB2_ORIGIN_BYTES } from '@unicitylabs/native-bridge-plugin/nb2';
 import { OriginFeed, originFeed, readCheckpointBytes } from '../src/origin.js';
-import { refreshTrust, refreshWalletAuthority } from '../src/trust.js';
+import { bootstrapTrust, refreshTrust, refreshWalletAuthority, withOrigin } from '../src/trust.js';
 import { begin, end, installFetchTrace } from '../src/trace.js';
 import { makeRoot } from './world.js';
 
@@ -13,6 +13,12 @@ const document = {
   schema: 'unicity-nb2-origin', version: 1, ...binding, blockNumber: 5, blockHash: `0x${'05'.repeat(32)}`, usableEpoch: '1', rootRound: '133',
 };
 const url = new URL('https://test.example/release/nb2-origin.json');
+
+async function savedGenesis(namespace: string) {
+  const root = await makeRoot();
+  const { trust } = await bootstrapTrust(new AggregatorClient(url.origin), Buffer.from(root.pin).toString('hex'), 3, namespace, root.bundle);
+  return withOrigin(trust, initial);
+}
 
 test('the checkpoint feed must be on the selected authenticated release channel', () => {
   assert.equal(originFeed('https://test.example/release/nb2-release.json', 'https://test.example').href, url.href);
@@ -67,7 +73,7 @@ test('the wallet persists only accepted monotonic checkpoints and restores them 
 });
 
 test('an invalid cached checkpoint is discarded and the authenticated feed can recover Connect', async (t) => {
-  const trust = (await makeRoot()).trust.withAuthenticatedOrigin(initial);
+  const trust = await savedGenesis('restore-origin.');
   let saved: string | null = '{"schema":"invalid"}';
   const store = {
     get: async () => saved,
@@ -87,7 +93,7 @@ test('an invalid cached checkpoint is discarded and the authenticated feed can r
 });
 
 test('a persisted B1 advance returns while the UTB transport is stalled', { timeout: 2_000 }, async (t) => {
-  const trust = (await makeRoot()).trust.withAuthenticatedOrigin(initial);
+  const trust = await savedGenesis('stalled-utb.');
   const agg = new AggregatorClient('https://test.example/aggregator');
   const deadline = new AbortController();
   t.after(() => deadline.abort());
@@ -130,7 +136,7 @@ test('a persisted B1 advance returns while the UTB transport is stalled', { time
 });
 
 test('an origin appearing just after a stale poll is accepted on the next one-second poll', { timeout: 3_000 }, async (t) => {
-  const trust = (await makeRoot()).trust.withAuthenticatedOrigin(initial);
+  const trust = await savedGenesis('stale-poll.');
   const store = { get: async () => null, put: async () => {}, delete: async () => {} };
   const feed = new OriginFeed(trust, binding, initial, url, store);
   let requests = 0;

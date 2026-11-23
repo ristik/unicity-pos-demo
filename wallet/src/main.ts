@@ -792,7 +792,11 @@ async function refreshWalletTrust(agg: AggregatorClient, waitFromRound?: bigint)
   const held = need(trust, 'connect first');
   const checkpoint = checkpointFeed;
   const result = await refreshWalletAuthority(held, () => refreshTrust(held, agg), checkpoint, waitFromRound);
-  if (trust?.history === held.history) trust = checkpoint?.current ?? result.trust;
+  const next = result.trust.origin;
+  if (trust?.history === held.history && (!trust.origin || (next &&
+      next.usableEpoch >= trust.origin.usableEpoch && next.rootRound >= trust.origin.rootRound))) {
+    trust = result.trust;
+  }
   if (result.historyFailed) fact('UTB refresh', 'Unavailable. Keeping authenticated history.');
   if (result.checkpointFailed) fact('B1 checkpoint feed', 'Unavailable or invalid. Keeping the authenticated checkpoint.');
   if (trust?.origin) fact('B1 origin', `epoch ${trust.origin.usableEpoch}, root round ${trust.origin.rootRound}`);
