@@ -8,7 +8,8 @@ import type { Published } from './release.js';
 export const CHECKPOINT_PATH = '/release/nb2-origin.json';
 const utf8 = new TextEncoder();
 const REFRESH_WAIT_MS = 80_000;
-const REFRESH_INTERVAL_MS = 4_000;
+const REFRESH_INTERVAL_MS = 1_000;
+const MAX_REFRESH_INTERVAL_MS = 4_000;
 
 type Store = Pick<IdbKv, 'get' | 'put' | 'delete'>;
 
@@ -75,7 +76,9 @@ export async function readCheckpointBytes(response: Response): Promise<Uint8Arra
 export class OriginFeed {
   private held: Nb2OriginCheckpoint;
   private accepting: Promise<void> = Promise.resolve();
-  private fetchedAt = 0;
+  private nextFetchAt = 0;
+  private interval = REFRESH_INTERVAL_MS;
+  private fetching?: Promise<void>;
   private trust: TrustInput;
   private readonly key: string;
 
@@ -121,21 +124,35 @@ export class OriginFeed {
     await pending;
   }
 
-  async refresh(waitForAdvance = false, waitMs = REFRESH_WAIT_MS): Promise<TrustInput> {
+  private async fetchCheckpoint(): Promise<void> {
+    const block = this.held.blockNumber;
+    try {
+      const res = await fetch(this.url, { cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(15_000) });
+      if (!res.ok) throw new Error(`B1 checkpoint feed returned HTTP ${res.status}.`);
+      await this.accept(await readCheckpointBytes(res), true);
+    } finally {
+      // Share both the in-flight request and the cooldown across callers.
+      // A replay or failure backs off. A persisted successor restores the 1 s interval.
+      const advanced = this.held.blockNumber > block;
+      this.nextFetchAt = performance.now() + (advanced ? REFRESH_INTERVAL_MS : this.interval);
+      this.interval = advanced ? REFRESH_INTERVAL_MS : Math.min(this.interval * 2, MAX_REFRESH_INTERVAL_MS);
+    }
+  }
+
+  async refresh(waitForAdvance = false, waitMs = REFRESH_WAIT_MS, signal?: AbortSignal): Promise<TrustInput> {
     if (globalThis.navigator?.onLine === false) return this.trust;
     const previous = this.held.rootRound;
     const deadline = performance.now() + waitMs;
-    for (;;) {
-      if (performance.now() - this.fetchedAt >= REFRESH_INTERVAL_MS || this.fetchedAt === 0) {
-        const res = await fetch(this.url, { cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(15_000) });
-        if (!res.ok) throw new Error(`B1 checkpoint feed returned HTTP ${res.status}.`);
-        await this.accept(await readCheckpointBytes(res), true);
-        this.fetchedAt = performance.now();
+    while (!signal?.aborted) {
+      if (!this.fetching && performance.now() >= this.nextFetchAt) {
+        this.fetching = this.fetchCheckpoint().finally(() => { this.fetching = undefined; });
       }
+      await this.fetching;
       if (!waitForAdvance || this.held.rootRound > previous) return this.trust;
       const remaining = deadline - performance.now();
       if (remaining <= 0) return this.trust;
-      await sleep(Math.min(REFRESH_INTERVAL_MS, remaining));
+      await sleep(Math.min(remaining, Math.max(0, this.nextFetchAt - performance.now())));
     }
+    return this.trust;
   }
 }

@@ -1,18 +1,25 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { setImmediate } from 'node:timers/promises';
+import { AggregatorClient } from '@unicitylabs/state-transition-sdk/lib/api/AggregatorClient.js';
+import { TrustBaseUpdater } from '@unicitylabs/state-transition-sdk/lib/api/bft/trustbase/TrustBaseUpdater.js';
 import { RootTrustBaseV2 } from '@unicitylabs/state-transition-sdk/lib/api/bft/trustbase/RootTrustBaseV2.js';
 import { DataHasher } from '@unicitylabs/state-transition-sdk/lib/crypto/hash/DataHasher.js';
 import { HashAlgorithm } from '@unicitylabs/state-transition-sdk/lib/crypto/hash/HashAlgorithm.js';
 import { CborMap } from '@unicitylabs/state-transition-sdk/lib/serialization/cbor/CborMap.js';
 import { CborMapEntry } from '@unicitylabs/state-transition-sdk/lib/serialization/cbor/CborMapEntry.js';
 import { CborSerializer as C } from '@unicitylabs/state-transition-sdk/lib/serialization/cbor/CborSerializer.js';
-import { refreshWalletAuthority } from '../src/trust.js';
+import { TrustInput } from '@unicitylabs/native-bridge-plugin';
+import { hex, unhex } from '../src/hex.js';
+import { OriginFeed } from '../src/origin.js';
+import { load } from '../src/store.js';
+import { bootstrapTrust, refreshTrust, refreshWalletAuthority, withOrigin } from '../src/trust.js';
 import { Chain } from '../src/pos/chain.js';
 import { posAddresses } from '../src/pos/config.js';
 import { fifthValidator, JoinEvidence } from '../src/pos/join.js';
 import { FakeChain, makeConfig, makeRoot, NETWORK, roundNow } from './world.js';
 
-test('a pinned 4 → 5 handoff locates the first UC with a valid new-member signature', async () => {
+test('a pinned 4 → 5 handoff locates the first UC with a valid new-member signature', async (t) => {
   const old = await makeRoot(4);
   const joined = await makeRoot(5);
   const chain = await FakeChain.create(old, makeConfig(old));
@@ -31,6 +38,71 @@ test('a pinned 4 → 5 handoff locates the first UC with a valid new-member sign
     new CborMapEntry(C.encodeTextString(id), C.encodeByteString((await key.sign(hash)).encode()))));
   const held = old.trust;
   const next = RootTrustBaseV2.decode(entry(C.encodeMap(new CborMap(signatures))));
+  const agg = new AggregatorClient('https://test.example');
+  const { trust: bootstrapped } = await bootstrapTrust(agg, hex(old.pin), NETWORK, 'join-background.', old.bundle);
+  const backgroundHeld = withOrigin(bootstrapped, held.origin!);
+  const before = backgroundHeld.origin!.rootRound;
+  const covering = backgroundHeld.withAuthenticatedOrigin({ usableEpoch: 1n, rootRound: before + 1n });
+  let releaseHistory!: () => void;
+  const background = new Promise<void>((resolve) => { releaseHistory = resolve; }).then(() => backgroundHeld.history.append(next));
+  const available = await refreshWalletAuthority(backgroundHeld, () => background, {
+    current: covering,
+    refresh: async () => { throw new Error('unexpected checkpoint fetch'); },
+  }, before);
+  assert.equal(available.trust, covering);
+  assert.equal(available.trust.history.tip?.epoch, 1n);
+  releaseHistory();
+  await background;
+  assert.equal(available.trust.history.tip?.epoch, 2n);
+  assert.equal(available.trust.origin?.rootRound, before + 1n);
+
+  await t.test('a newly required authenticated epoch must be saved before the authority retry returns', async (t) => {
+    const namespace = 'join-before-save.';
+    const { trust } = await bootstrapTrust(agg, hex(old.pin), NETWORK, namespace, old.bundle);
+    const initial = { usableEpoch: 1n, rootRound: start - 1n, blockNumber: 4, blockHash: `0x${'04'.repeat(32)}` };
+    const previous = withOrigin(trust, initial);
+    const binding = { network: NETWORK, generation: 'fixture', genesisHash: `0x${'ab'.repeat(32)}`, releaseSha256: 'cd'.repeat(32) };
+    const feed = new OriginFeed(previous, binding, initial, new URL('https://test.example/release/nb2-origin.json'), {
+      get: async () => null, put: async () => {}, delete: async () => {},
+    });
+    t.mock.method(globalThis, 'fetch', async () => Response.json({
+      schema: 'unicity-nb2-origin', version: 1, ...binding, blockNumber: 5, blockHash: `0x${'05'.repeat(32)}`,
+      usableEpoch: '2', rootRound: String(start),
+    }));
+    let appended!: () => void;
+    let resume!: () => void;
+    const appendedInMemory = new Promise<void>((resolve) => { appended = resolve; });
+    const pause = new Promise<void>((resolve) => { resume = resolve; });
+    t.mock.method(TrustBaseUpdater, 'update', async () => {
+      await previous.history.append(next);
+      appended();
+      await pause;
+      return 1;
+    });
+    const pending = refreshTrust(previous, agg);
+    const savedTip = async () => (await TrustInput.fromBundle(unhex(load(`${namespace}trust.bundle`)!), old.pin)).history.tip?.epoch;
+    let retry;
+    try {
+      await appendedInMemory;
+      assert.equal(previous.history.tip?.epoch, 2n);
+      assert.equal(await savedTip(), 1n);
+      await feed.refresh();
+      assert.equal(feed.current.origin?.usableEpoch, 2n);
+      let returned = false;
+      retry = refreshWalletAuthority(previous, () => refreshTrust(previous, agg), feed, initial.rootRound).then((result) => {
+        returned = true;
+        return result;
+      });
+      await setImmediate();
+      assert.equal(returned, false, 'the in-memory tip alone must not unblock the retry');
+    } finally {
+      resume();
+      await pending;
+    }
+    assert.equal((await retry).trust.origin?.rootRound, start);
+    assert.equal(await savedTip(), 2n);
+  });
+
   const refreshed = await refreshWalletAuthority(held, async () => held.history.append(next), {
     current: held,
     refresh: async () => { throw new Error('B1 checkpoint HTTP 503'); },

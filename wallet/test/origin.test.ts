@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { AggregatorClient } from '@unicitylabs/state-transition-sdk/lib/api/AggregatorClient.js';
 import { MAX_NB2_ORIGIN_BYTES } from '@unicitylabs/native-bridge-plugin/nb2';
 import { OriginFeed, originFeed, readCheckpointBytes } from '../src/origin.js';
-import { refreshTrust, refreshWalletAuthority } from '../src/trust.js';
+import { bootstrapTrust, refreshTrust, refreshWalletAuthority, withOrigin } from '../src/trust.js';
 import { begin, end, installFetchTrace } from '../src/trace.js';
 import { makeRoot } from './world.js';
 
@@ -14,6 +14,12 @@ const document = {
 };
 const url = new URL('https://test.example/release/nb2-origin.json');
 
+async function savedGenesis(namespace: string) {
+  const root = await makeRoot();
+  const { trust } = await bootstrapTrust(new AggregatorClient(url.origin), Buffer.from(root.pin).toString('hex'), 3, namespace, root.bundle);
+  return withOrigin(trust, initial);
+}
+
 test('the checkpoint feed must be on the selected authenticated release channel', () => {
   assert.equal(originFeed('https://test.example/release/nb2-release.json', 'https://test.example').href, url.href);
   assert.throws(() => originFeed('https://elsewhere.example/release/nb2-release.json', 'https://test.example'), /authenticated release origin/);
@@ -21,6 +27,8 @@ test('the checkpoint feed must be on the selected authenticated release channel'
 });
 
 test('the wallet persists only accepted monotonic checkpoints and restores them on reload', async (t) => {
+  let now = 0;
+  t.mock.method(performance, 'now', () => now);
   const trust = (await makeRoot()).trust.withAuthenticatedOrigin(initial);
   let saved: string | null = null;
   let failWrite = true;
@@ -47,6 +55,7 @@ test('the wallet persists only accepted monotonic checkpoints and restores them 
   await assert.rejects(wallet.refresh(), /durable write failed/);
   assert.equal(wallet.current.origin?.rootRound, 100n);
   failWrite = false;
+  now += 1_000;
   assert.equal((await wallet.refresh()).origin?.rootRound, 133n);
   assert.equal(JSON.parse(saved!).rootRound, '133');
   const reopened = new OriginFeed(trust, binding, initial, url, store);
@@ -58,12 +67,13 @@ test('the wallet persists only accepted monotonic checkpoints and restores them 
   assert.equal(saved, durable);
   assert.equal(reopened.current.origin?.rootRound, 133n);
   offered = { ...document, releaseSha256: 'ef'.repeat(32) };
+  now += 1_000;
   await assert.rejects(reopened.refresh(), /different release/);
   assert.equal(saved, durable);
 });
 
 test('an invalid cached checkpoint is discarded and the authenticated feed can recover Connect', async (t) => {
-  const trust = (await makeRoot()).trust.withAuthenticatedOrigin(initial);
+  const trust = await savedGenesis('restore-origin.');
   let saved: string | null = '{"schema":"invalid"}';
   const store = {
     get: async () => saved,
@@ -82,36 +92,107 @@ test('an invalid cached checkpoint is discarded and the authenticated feed can r
   assert.equal(JSON.parse(saved!).rootRound, '133');
 });
 
-test('a stalled UTB transport times out without losing a persisted B1 advance', { timeout: 2_000 }, async (t) => {
-  const trust = (await makeRoot()).trust.withAuthenticatedOrigin(initial);
+test('a persisted B1 advance returns while the UTB transport is stalled', { timeout: 2_000 }, async (t) => {
+  const trust = await savedGenesis('stalled-utb.');
   const agg = new AggregatorClient('https://test.example/aggregator');
-  const deadline = AbortSignal.timeout(300);
-  let savedWhilePending = false;
+  const deadline = new AbortController();
+  t.after(() => deadline.abort());
+  let saved = false;
   let sawAbort = false;
+  let originRequests = 0;
   const store = {
     get: async () => null,
-    put: async () => { savedWhilePending = !deadline.aborted; },
+    put: async () => { saved = true; },
     delete: async () => {},
   };
   const feed = new OriginFeed(trust, binding, initial, url, store);
   t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
-    if (String(input) === url.href) return Response.json(document);
+    if (String(input) === url.href) { originRequests++; return Response.json(document); }
     assert.match(String(input), /\/api\/v1\/trustbases/);
-    assert.equal(init?.signal, deadline);
+    assert.equal(init?.signal, deadline.signal);
     // The upstream request never responds. Only its own transport signal can settle it.
     return new Promise<Response>((_resolve, reject) => {
-      deadline.addEventListener('abort', () => {
+      deadline.signal.addEventListener('abort', () => {
         sawAbort = true;
-        reject(deadline.reason);
+        reject(deadline.signal.reason);
       }, { once: true });
     });
   });
-  const refreshed = await refreshWalletAuthority(trust, () => refreshTrust(trust, agg, deadline), feed, initial.rootRound);
-  assert.equal(sawAbort, true);
-  assert.equal(savedWhilePending, true);
-  assert.equal(refreshed.historyFailed, true);
+  const pending = refreshTrust(trust, agg, deadline.signal);
+  const refreshing = () => refreshTrust(feed.current, agg);
+  const refreshed = await refreshWalletAuthority(trust, refreshing, feed, initial.rootRound);
+  assert.equal(sawAbort, false);
+  assert.equal(saved, true);
   assert.equal(refreshed.checkpointFailed, false);
   assert.equal(refreshed.trust.origin?.rootRound, 133n);
+  assert.equal(refreshed.trust.history, trust.history);
+  assert.equal(refreshing(), pending, 'the successor shares the running UTB update');
+  assert.equal((await refreshWalletAuthority(trust, refreshing, feed, initial.rootRound)).trust, refreshed.trust);
+  assert.equal(originRequests, 1, 'a covering held checkpoint can be returned without another fetch');
+  deadline.abort();
+  await assert.rejects(pending);
+  assert.equal(sawAbort, true);
+  assert.equal(feed.current, refreshed.trust);
+});
+
+test('an origin appearing just after a stale poll is accepted on the next one-second poll', { timeout: 3_000 }, async (t) => {
+  const trust = await savedGenesis('stale-poll.');
+  const store = { get: async () => null, put: async () => {}, delete: async () => {} };
+  const feed = new OriginFeed(trust, binding, initial, url, store);
+  let requests = 0;
+  t.mock.method(globalThis, 'fetch', async () => Response.json(++requests === 1
+    ? { ...document, ...initial, usableEpoch: '1', rootRound: '100' } : document));
+  await feed.refresh();
+  let finishHistory!: () => void;
+  const history = new Promise<void>((resolve) => { finishHistory = resolve; });
+  try {
+    const result = await refreshWalletAuthority(trust, () => history, feed, initial.rootRound);
+    assert.equal(result.trust.origin?.rootRound, 133n);
+    assert.equal(requests, 2);
+  } finally {
+    finishHistory();
+  }
+});
+
+test('bursts share one request and the feed backs off on replay and errors up to four seconds', async (t) => {
+  let now = 0;
+  t.mock.method(performance, 'now', () => now);
+  const trust = (await makeRoot()).trust.withAuthenticatedOrigin(initial);
+  const store = { get: async () => null, put: async () => {}, delete: async () => {} };
+  const feed = new OriginFeed(trust, binding, initial, url, store);
+  const old = { ...document, ...initial, usableEpoch: '1', rootRound: '100' };
+  let requests = 0;
+  let reply!: (res: Response) => void;
+  const first = new Promise<Response>((resolve) => { reply = resolve; });
+  t.mock.method(globalThis, 'fetch', async () => {
+    switch (++requests) {
+      case 1: return first;
+      case 2: return new Response(null, { status: 503 });
+      case 5:
+      case 6: return Response.json(document);
+      default: return Response.json(old);
+    }
+  });
+  const burst = () => Array.from({ length: 12 }, () => feed.refresh());
+  const inFlight = burst();
+  assert.equal(requests, 1);
+  reply(Response.json(old));
+  await Promise.all(inFlight);
+  now = 999;
+  await Promise.all(burst());
+  assert.equal(requests, 1);
+  now = 1_000;
+  assert.ok((await Promise.allSettled(burst())).every((attempt) => attempt.status === 'rejected'));
+  assert.equal(requests, 2);
+  for (const [early, due, count] of [[2_999, 3_000, 3], [6_999, 7_000, 4], [10_999, 11_000, 5], [11_999, 12_000, 6]]) {
+    now = early;
+    await Promise.all(burst());
+    assert.equal(requests, count - 1);
+    now = due;
+    await Promise.all(burst());
+    assert.equal(requests, count);
+  }
+  assert.equal(feed.current.origin?.rootRound, 133n);
 });
 
 test('checkpoint transport enforces the decoded byte cap before buffering an oversized chunk', async (t) => {
