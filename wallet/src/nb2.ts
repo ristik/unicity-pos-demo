@@ -227,7 +227,12 @@ export async function mint(s: Session, intent: bigint, note?: (reason: string) =
   const p = await retry(() => s.bridge.collectDepositProof(intent), note, 120, 2_000, NOT_YET);
   fact('deposit number', p.depositNumber.toString());
   fact('receipt proof J', `${p.reason.length} bytes`);
-  const token = await retry(() => s.bridge.mint(intent), note);
+  const token = await retry(() => s.bridge.mint(intent), note).catch((error: unknown) => {
+    if (!isOriginAhead(error)) throw error;
+    // Give the saved proof its ordinary catch-up window first. A single
+    // recovery lookup can then replace an unusable future claim.
+    return s.bridge.mint(intent, { recoverProof: true });
+  });
   const v = await s.bridge.verifyToken(token);
   fact('token id', `0x${hex(v.tokenId)}`);
   fact('token file', `${token.length} bytes`);
