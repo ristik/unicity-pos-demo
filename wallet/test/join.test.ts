@@ -31,6 +31,22 @@ test('a pinned 4 → 5 handoff locates the first UC with a valid new-member sign
     new CborMapEntry(C.encodeTextString(id), C.encodeByteString((await key.sign(hash)).encode()))));
   const held = old.trust;
   const next = RootTrustBaseV2.decode(entry(C.encodeMap(new CborMap(signatures))));
+  const backgroundHeld = await held.snapshot();
+  const before = backgroundHeld.origin!.rootRound;
+  const covering = backgroundHeld.withAuthenticatedOrigin({ usableEpoch: 1n, rootRound: before + 1n });
+  let releaseHistory!: () => void;
+  const background = new Promise<void>((resolve) => { releaseHistory = resolve; }).then(() => backgroundHeld.history.append(next));
+  const available = await refreshWalletAuthority(backgroundHeld, () => background, {
+    current: covering,
+    refresh: async () => { throw new Error('unexpected checkpoint fetch'); },
+  }, before);
+  assert.equal(available.trust, covering);
+  assert.equal(available.trust.history.tip?.epoch, 1n);
+  releaseHistory();
+  await background;
+  assert.equal(available.trust.history.tip?.epoch, 2n);
+  assert.equal(available.trust.origin?.rootRound, before + 1n);
+
   const refreshed = await refreshWalletAuthority(held, async () => held.history.append(next), {
     current: held,
     refresh: async () => { throw new Error('B1 checkpoint HTTP 503'); },

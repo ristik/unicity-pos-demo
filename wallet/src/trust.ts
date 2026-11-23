@@ -26,6 +26,7 @@ export interface EntryView {
 
 /** The storage prefix each held history persists under ('' for the wallet; another page passes its own, so it never writes the wallet's keys). */
 const namespaces = new WeakMap<TrustInput, string>();
+const refreshing = new WeakMap<TrustBaseHistory, Promise<number>>();
 
 const persist = async (trust: TrustInput): Promise<void> => {
   const ns = namespaces.get(trust) ?? '';
@@ -79,7 +80,15 @@ export async function bootstrapTrust(agg: AggregatorClient, pinHex: string, netw
 }
 
 /** Fetch the entries after the held tip (each authenticated from its predecessor) and persist; returns how many were appended. */
-export async function refreshTrust(trust: TrustInput, agg: AggregatorClient, signal = AbortSignal.timeout(15_000)): Promise<number> {
+export function refreshTrust(trust: TrustInput, agg: AggregatorClient, signal?: AbortSignal): Promise<number> {
+  const pending = refreshing.get(trust.history);
+  if (pending) return pending;
+  const update = updateHistory(trust, agg, signal ?? AbortSignal.timeout(15_000)).finally(() => refreshing.delete(trust.history));
+  refreshing.set(trust.history, update);
+  return update;
+}
+
+async function updateHistory(trust: TrustInput, agg: AggregatorClient, signal: AbortSignal): Promise<number> {
   const before = trust.history.tip?.epoch ?? 0n;
   try {
     const n = await TrustBaseUpdater.update(trust.history, [agg], { signal, limits: { ...TRUST_BASE_PAGE_LIMITS, maxEntries: 64 } });
@@ -100,22 +109,35 @@ export async function refreshWalletAuthority(
   waitFromRound?: bigint,
 ): Promise<{ trust: TrustInput; entriesAdded: number; historyFailed: boolean; checkpointFailed: boolean }> {
   const previousLength = trust.history.entries.length;
-  const [historyResult, firstCheckpoint] = await Promise.allSettled([
-    (async () => refreshHistory())(),
-    (async () => checkpoint?.refresh())(),
-  ]);
-  const entriesAdded = trust.history.entries.length - previousLength;
-  let checkpointFailed = firstCheckpoint.status === 'rejected';
-  if (checkpoint && !checkpointFailed && entriesAdded === 0 && waitFromRound !== undefined &&
-      (checkpoint.current.origin?.rootRound ?? 0n) <= waitFromRound) {
-    try { await checkpoint.refresh(true); } catch { checkpointFailed = true; }
-  }
-  return {
-    trust: checkpoint?.current ?? trust,
-    entriesAdded,
-    historyFailed: historyResult.status === 'rejected',
-    checkpointFailed,
+  const entriesAdded = () => trust.history.entries.length - previousLength;
+  const current = () => checkpoint?.current ?? trust;
+  let historyFailed = false;
+  let checkpointFailed = false;
+  // The updater appends to the history shared by all accepted origins. A
+  // late completion has no authority to replace the checkpoint in use.
+  const history = Promise.resolve().then(refreshHistory).catch(() => { historyFailed = true; });
+  const originAdvanced = () => waitFromRound !== undefined && (current().origin?.rootRound ?? 0n) > waitFromRound;
+  const ready = () => {
+    const { origin, history } = current();
+    return origin !== undefined && originAdvanced() && (history.tip?.epoch ?? 0n) >= origin.usableEpoch;
   };
+  const result = () => ({ trust: current(), entriesAdded: entriesAdded(), historyFailed, checkpointFailed });
+  if (checkpoint && ready()) return result();
+  try { await checkpoint?.refresh(); } catch { checkpointFailed = true; }
+  if (checkpoint && ready()) return result();
+  if (!checkpoint || waitFromRound === undefined || checkpointFailed || originAdvanced()) {
+    await history;
+    return result();
+  }
+  if (entriesAdded() > 0) return result();
+  const stop = new AbortController();
+  const poll = checkpoint.refresh(true, undefined, stop.signal).catch(() => { checkpointFailed = true; });
+  await Promise.race([
+    poll.then(async () => { if (!ready()) await history; }),
+    history.then(async () => { if (entriesAdded() === 0) await poll; }),
+  ]);
+  stop.abort();
+  return result();
 }
 
 export async function entries(trust: TrustInput): Promise<EntryView[]> {
