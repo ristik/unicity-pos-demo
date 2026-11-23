@@ -31,7 +31,7 @@ Check the release and rehearsal status before presenting the live flow. -->
 
 1. **The setup**: what runs on the testnet, its endpoints and repos.
 2. **Assets demo** (NB2 v1.1): UCT from the faucet → **deposit** → mint a Unicity token → split → send to a second wallet (another tab) → **burn** → **redeem** on the EVM.
-3. **PoS demo**: the committee, stakes and quorum, live. A new validator **registers and bonds**, the next election **selects it by stake**, the operator **publishes its proof** and enrolls its authority after the handoff. An old-epoch token **still verifies**; a forged one is rejected.
+3. **PoS demo**: the committee, stakes and quorum, live. A new validator joins from a container. The election **selects it by stake**, and the validator **publishes its own proof** and verifies activation with its local root. An old-epoch token **still verifies**. A forged one is rejected.
 4. **How it works underneath**: elections, slashing, governance, the bridge. Then PoA, the intermediate mode, and what's still left to do.
 
 Everything in the assets demo runs in a browser: no install, a burner key, public endpoints only.
@@ -298,27 +298,20 @@ Same registry, same handoff, same nodes. Only the **election module** differs: *
 
 <!-- _class: small -->
 
-## Sysadmin manual (summary): running a validator
+## Running a validator with Docker
 
-**You need:** a reference-class server (6c/12t, 64 GB, 2 × 1 TB NVMe), ports 8000 (root p2p), 9000 (shard p2p) and 30303 (ureth devp2p) open, an EVM account with UCT for gas, and at least 100 UCT to bond.
+Use a Linux amd64 Docker host with a reachable IPv4 address. Open or forward **TCP 27652** for root P2P and **TCP 29252** for shard P2P. Execution and operator RPCs stay on loopback.
+
+Verify and load the image. Run `ubft-validator init` with your public announce address. Start its `authority` and `run` roles in separate containers sharing one volume. Fund the printed payee with **100 UCT plus gas**.
 
 ```sh
-ubft validator init   --rpc https://<gateway>/rpc --payee 0xYourPayee   # one key per service, writes validator.json
-ubft validator doctor                     # hardware, ports, clock, disk, keys, RPC reachability
-# start root node, shard node, signing authority, ureth (the testnet package's compose files)
-# use the handbook to import the seed, start followers and prepare the authority
-ubft validator apply --dry-run
-ubft validator apply                      # register, bond and bind
-# install the PoS authority policy for the assigned ID; wait for election to reserve the result
-ubft validator pos-publish --own-proof
-ubft validator status
+docker exec unicity-node ubft-validator join --yes
+docker exec unicity-node ubft-validator status
 ```
 
-- **At the boundary:** watch the verified handoff and read the activated root and shard epochs. Enroll the authority for those epochs using the handbook. The private rehearsal reached five registered committee members 3m 24s after apply began.
-- **Keys** stay on your machine, one per service. The signing authority holds the EVM key and signs only typed operations its policy allows. Its keys are in memory, so **a restart means a key rotation** (`ubft validator rotate`).
-- **Leaving:** `requestRetirement` → excluded at the next election → after holds and the evidence window, `mature` → `claim` to the withdrawal address.
-- **Upgrades:** `validator upgrade` checks the on-chain schedule on activation-capable releases. The exporter reports `unicity_upgrade_required`.
-- **Operator resources:** the public sync seed is available under `/release/`. The validator and Foundation handbooks cover monitoring, alerts and the rehearsed operator lifecycle.
+- **Public P2P and permissionless handoff.** Each validator submits its own proof. Any validator can publish the result once all proofs are recorded. Each node verifies activation from its own synced root.
+- **Replace only the node, using the same volume.** If the authority exits, stop and contact maintainers if registered, bonded or unsure. If confirmed unregistered and unbonded with no unresolved submissions, initialize a fresh authority in a separate volume. [Handbook](https://github.com/ristik/bft-core/blob/integration/enshrined-evm/docs/operations/validator-handbook.md#authority-loss) · [#1286](https://github.com/ristik/bft-core/issues/1286)
+- **Operator resources.** The public release provides the image, verified seed and public peer lists. The handbook covers upgrades and retirement. [Demo commands](https://github.com/ristik/unicity-pos-demo/blob/main/demo/add-validator.md)
 
 ---
 
@@ -454,9 +447,11 @@ Continuation UI shows certified progress, gap advances and final payment when th
 
 # Demo 2: PoS
 
-100 UCT bond → next boundary → 4 → 5 validators
+`ubft-validator join --yes` → 100 UCT bond → next boundary → 4 → 5 validators
 
-The old committee signs the new UTB entry. Find the first verified EVM UC signed by the fifth root. Private rehearsal: **3m 24s** from apply to five confirmed members. The verified UC for block 28 included the new root’s signature.
+The isolated rehearsal reached five confirmed members in **4m37s** over public P2P, including a node-container restart during the join.
+
+The old committee signs the new UTB entry. Show a verified EVM UC carrying the fifth root’s signature.
 
 Equal weights give **f = 1** in either committee: **n ≥ 3f + 1**. The root quorum rises **3 → 4**. Two Byzantine faults require seven validators.
 
