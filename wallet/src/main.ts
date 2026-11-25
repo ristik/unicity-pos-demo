@@ -11,7 +11,7 @@ import { AggregatorClient } from '@unicitylabs/state-transition-sdk/lib/api/Aggr
 import { sha256 } from '@noble/hashes/sha2.js';
 import { secp256k1 } from '@noble/curves/secp256k1.js';
 
-import { abs, COMPATIBLE_RELEASE_PLUGIN, DEFAULTS, loadSettings, pinOverridden, ORIGIN_CHANNEL, RELEASE_DIGEST, saveSettings, type Settings } from './config.js';
+import { abs, COMPATIBLE_RELEASE_PLUGIN, DEFAULTS, loadSettings, pinOverridden, RELEASE_DIGEST, saveSettings, type Settings } from './config.js';
 import { isAddress } from './evm.js';
 import * as faucet from './faucet.js';
 import { forgeRelabelled, forgeUnknownKeys, sealTable, verdict } from './forge.js';
@@ -23,14 +23,13 @@ import { legacyKeysOf } from './work.js';
 import { READ_ONLY_OK, VALUE_STEPS, importBlock, OperationGuard, refusal } from './guard.js';
 import { burnerFrom, loadExisting, loadOrCreateDurable, parseBackup, replaceKeyDurable, toMnemonic, type Burner } from './keys.js';
 import * as nb2 from './nb2.js';
-import { OriginFeed, originFeed, releaseCheckpoint } from './origin.js';
-import { authenticatedOrigin, checkRevision, fetchRelease, type Published } from './release.js';
+import { checkReleaseDigest, checkRevision, fetchRelease, type Published } from './release.js';
 import { encodeReturnBackup, readPayerPolicy } from './recovery.js';
 import { chooseReturnBackup, type SaveReturnBackup } from './return-backup.js';
 import { load, loadJson, PROFILE, remove, save, saveJson } from './store.js';
 import { getToken, initTokens, listTokens, patchToken, putToken, putTokens, tokensOpen, type Phase, type TokenRecord } from './tokens.js';
 import { begin, end, fact, installFetchTrace, reportStepFailure, type Trace } from './trace.js';
-import { bootstrapTrust, entries, refreshTrust, refreshWalletAuthority, withOrigin } from './trust.js';
+import { bootstrapTrust, entries, refreshTrust } from './trust.js';
 import { copyable, explain, h, mono } from './ui.js';
 
 installFetchTrace();
@@ -45,7 +44,6 @@ const settings: Settings = loadSettings();
 let me: Burner = loadExisting() ?? burnerFrom(secp256k1.utils.randomSecretKey());
 let trust: TrustInput | null = null;
 let published: Published | null = null;
-let checkpointFeed: OriginFeed | undefined;
 let session: nb2.Session | null = null;
 let currentId: string | null = load('current');
 let busy: string | null = null;
@@ -128,10 +126,8 @@ async function connect(): Promise<string> {
   const pin = settings.trustPin.trim();
   if (!pin) throw new Error(NO_PIN);
   let cfgError = '';
-  let origin: NonNullable<TrustInput['origin']> | undefined;
   session = null;
   published = null;
-  checkpointFeed = undefined;
   ready = false;
   try {
     published = await fetchRelease(settings.release);
@@ -141,14 +137,14 @@ async function connect(): Promise<string> {
     if (published.publishedPin && published.publishedPin !== pin.toLowerCase().replace(/^0x/, '')) {
       fact('warning', `the operator publishes genesis ${published.publishedPin}, not the pinned ${pin}: this build is for another network generation`);
     }
-    origin = authenticatedOrigin(published, RELEASE_DIGEST);
+    checkReleaseDigest(published, RELEASE_DIGEST);
     checkRevision(published.pluginCommit, BUILD_NBP, COMPATIBLE_RELEASE_PLUGIN);
   } catch (e) {
     cfgError = String(e);
   }
   const r = await bootstrapTrust(agg, pin, settings.network, '', published?.bundle);
-  trust = origin ? withOrigin(r.trust, origin) : r.trust;
-  if (origin && !storeProblem) {
+  trust = r.trust;
+  if (!storeProblem) {
     const saved = await kv.get(`return/authority/${hex(trust.id)}`);
     if (saved) {
       const held = await TrustInput.fromBundle(unhex(saved), trust.id);
@@ -157,28 +153,15 @@ async function connect(): Promise<string> {
   }
   fact('trust pin', `${pin} (from ${pinOverridden(settings) ? 'the Network settings: a developer override' : 'the build'})`);
   if (cfgError) {
-    await refreshWalletTrust(agg);
     fact('bridge', cfgError);
     return `trust loaded (epoch ${trust.history.tip?.epoch}); no bridge: ${cfgError}`;
   }
-  if (ORIGIN_CHANNEL && !storeProblem) {
-    const { binding, checkpoint } = releaseCheckpoint(published!, trust, RELEASE_DIGEST);
-    checkpointFeed = new OriginFeed(trust, binding, checkpoint, originFeed(published!.url, ORIGIN_CHANNEL), kv);
-    try {
-      if (!await checkpointFeed.restore()) fact('B1 checkpoint cache', 'Invalid cached checkpoint discarded.');
-    } catch {
-      fact('B1 checkpoint cache', 'Could not read or clear the cached checkpoint. Checking the authenticated feed.');
-    }
-    trust = checkpointFeed.current;
-  }
-  // Refresh both authorities before opening, keeping whichever authenticated update is available.
-  await refreshWalletTrust(agg);
   fact('trust history', `${r.source}, epochs ${trust.history.entries[0].epoch}..${trust.history.tip?.epoch}`);
   session = await nb2.openSession({
     settings, me, trust, published: published!, journal: kv, backup: backupIntents,
     refreshTrust: async () => {
-      if (navigator.onLine === false) return trust!;
-      await refreshWalletTrust(agg, session?.trust.origin?.rootRound);
+      if (navigator.onLine === false) throw new Error('Trust history is unavailable offline');
+      await refreshWalletTrust(agg);
       return trust!;
     },
   });
@@ -542,7 +525,6 @@ let checkView: HTMLElement = h('div');
 async function check(kind: 'verify' | 'unknown' | 'relabel'): Promise<string> {
   const t = need(current()?.bytes, 'select a token that has a token file');
   const s = sess();
-  if (kind === 'verify') await refreshTrust(s.trust, new AggregatorClient(abs(settings.aggregator))).catch((e: unknown) => fact('trust refresh', String(e)));
   let bytes = unhex(t);
   let note = 'the stored token, as held';
   if (kind === 'unknown') {
@@ -788,19 +770,8 @@ function flowCard(): HTMLElement {
 }
 
 let trustView: HTMLElement = h('p', { class: 'muted' }, 'Not loaded.');
-async function refreshWalletTrust(agg: AggregatorClient, waitFromRound?: bigint) {
-  const held = need(trust, 'connect first');
-  const checkpoint = checkpointFeed;
-  const result = await refreshWalletAuthority(held, () => refreshTrust(held, agg), checkpoint, waitFromRound);
-  const next = result.trust.origin;
-  if (trust?.history === held.history && (!trust.origin || (next &&
-      next.usableEpoch >= trust.origin.usableEpoch && next.rootRound >= trust.origin.rootRound))) {
-    trust = result.trust;
-  }
-  if (result.historyFailed) fact('UTB refresh', 'Unavailable. Keeping authenticated history.');
-  if (result.checkpointFailed) fact('B1 checkpoint feed', 'Unavailable or invalid. Keeping the authenticated checkpoint.');
-  if (trust?.origin) fact('B1 origin', `epoch ${trust.origin.usableEpoch}, root round ${trust.origin.rootRound}`);
-  return result;
+async function refreshWalletTrust(agg: AggregatorClient): Promise<number> {
+  return refreshTrust(need(trust, 'connect first'), agg);
 }
 
 async function showTrust(fetchNew: boolean): Promise<string> {
@@ -815,12 +786,8 @@ async function showTrust(fetchNew: boolean): Promise<string> {
       h('td', {}, h('details', {}, h('summary', {}, `${e.members.length}`), h('ul', {}, ...e.members.map((m) => h('li', {}, `${m.nodeId} · weight ${m.weight} · `, mono(m.key)))))),
       h('td', { class: 'num' }, `${e.quorum} / ${e.totalWeight}`)))));
   const held = trust ?? tr;
-  const origin = held.origin ? ` · B1 root round ${held.origin.rootRound}` : '';
-  if (!refreshed) return `tip epoch ${held.history.tip?.epoch}${origin}`;
-  const { entriesAdded, historyFailed, checkpointFailed } = refreshed;
-  const unavailable = [historyFailed && 'UTB history', checkpointFailed && 'B1 checkpoint'].filter(Boolean);
-  return `${entriesAdded} new entr${entriesAdded === 1 ? 'y' : 'ies'} · tip epoch ${held.history.tip?.epoch}${origin}`
-    + (unavailable.length ? ` · refresh unavailable for ${unavailable.join(' and ')}` : '');
+  if (refreshed === null) return `tip epoch ${held.history.tip?.epoch}`;
+  return `${refreshed} new entr${refreshed === 1 ? 'y' : 'ies'} · tip epoch ${held.history.tip?.epoch}`;
 }
 
 function trustCard(): HTMLElement {

@@ -5,7 +5,7 @@
  * was released with (`bridge.sources`).
  */
 import { sha256 } from '@noble/hashes/sha2.js';
-import type { AuthenticatedOrigin, DeploymentPins } from '@unicitylabs/native-bridge-plugin/nb2';
+import type { DeploymentPins } from '@unicitylabs/native-bridge-plugin/nb2';
 
 import { hex, unhex } from './hex.js';
 
@@ -14,7 +14,7 @@ export interface Release {
   package?: { generation?: string; chainId?: number; genesisHash?: string; validators?: number };
   bridge?: { sources?: Record<string, string> };
   deployment?: Record<string, unknown>;
-  trust?: { bundle?: string; genesisEntryId?: string; origin?: unknown };
+  trust?: { bundle?: string; genesisEntryId?: string };
   limits?: Record<string, { value?: unknown }>;
   envelope?: unknown;
   [k: string]: unknown;
@@ -79,16 +79,9 @@ export function checkRevision(manifest: string | null, build: string | null, com
   if (manifest !== build && manifest !== compatible) throw new Error(`the manifest was released with native-bridge-plugins ${manifest}, this build bundles ${build}: the bridge stays closed (rebuild the wallet against the manifest's revision)`);
 }
 
-/** The B1 checkpoint is deployment authority, so pin the manifest before using its origin or calibration. */
-export function authenticatedOrigin(published: Published, digest: string): AuthenticatedOrigin {
+/** Pin the manifest before using its deployment and calibration. */
+export function checkReleaseDigest(published: Published, digest: string): void {
   if (!/^[0-9a-f]{64}$/.test(digest) || published.sha256 !== digest) {
     throw new Error('The NB2 release manifest does not match VITE_NB2_RELEASE_SHA256');
   }
-  const origin = published.release.trust?.origin as { usableEpoch?: unknown; rootRound?: unknown } | undefined;
-  const uint = /^(0|[1-9][0-9]*)$/;
-  if (!origin || typeof origin.usableEpoch !== 'string' || !uint.test(origin.usableEpoch)
-    || typeof origin.rootRound !== 'string' || !uint.test(origin.rootRound)) {
-    throw new Error('The pinned release needs a B1 origin with decimal usableEpoch and rootRound');
-  }
-  return { usableEpoch: BigInt(origin.usableEpoch), rootRound: BigInt(origin.rootRound) };
 }

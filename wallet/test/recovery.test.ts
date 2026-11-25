@@ -75,6 +75,8 @@ test('continuation resumes the exact signed bytes and reaches certified Paid', a
       if (rejectSegmentLogs && isSegmentLookup(method, params)) {
         throw new RpcError(200, -32000, 'primary-private-marker', { secret: 'primary-data' });
       }
+      // coldCall models mined changes; a finalized eth_call must not advance its cursor.
+      if (method === 'eth_call' && typeof params[1] === 'object') return '0x' as T;
       const result = await rpc.call<T>(method, params);
       if (method === 'eth_sendRawTransaction' && ++sent === 1) throw new Error('browser interrupted after send');
       return result;
