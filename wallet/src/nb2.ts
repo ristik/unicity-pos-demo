@@ -93,7 +93,6 @@ export interface Session {
   aggregator: Aggregator;
   /** the backup callback the session was opened with (a recovered, unbacked-up intent finishes it) */
   backup: (intents: IntentsRecord) => Promise<void>;
-  refreshTrust: OpenArgs['refreshTrust'];
 }
 
 export interface OpenArgs {
@@ -132,7 +131,7 @@ export async function openSession(a: OpenArgs): Promise<Session> {
     bridgeKey: deriveBridgeKey(tagged('unicity-demo/nb2/seed/', a.me.secret)),
     backup: a.backup, refreshTrust, ...(a.rpc ? {} : { trustFreshnessMs: 15 * 60_000, requireImportedTipProfile: true }), receiptTimeoutMs: a.rpc ? 0 : 180_000, pollMs: a.rpc ? 0 : 1_000, ...(a.gas ? { gas: a.gas } : {}),
   });
-  return { bridge, get trust() { return heldTrust; }, published: a.published, pins: a.published.pins, signer: new LocalKeySigner(a.me.secret), owner: localOwner(a.me.secret), pub: a.me.publicKey, aggregator, backup: a.backup, refreshTrust: async () => { await bridge.syncTrust(); return heldTrust; } };
+  return { bridge, get trust() { return heldTrust; }, published: a.published, pins: a.published.pins, signer: new LocalKeySigner(a.me.secret), owner: localOwner(a.me.secret), pub: a.me.publicKey, aggregator, backup: a.backup };
 }
 
 /**
@@ -286,7 +285,6 @@ export function recoveryWallet(s: Session, store: IdbKv) {
     async persistAuthority(next: TrustInput) {
       await store.put(`return/authority/${hex(next.id)}`, hex(await next.history.toBundle()));
     },
-    async refreshAuthority() { return await s.refreshTrust() ?? s.trust; },
   };
 }
 

@@ -1,18 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { setImmediate } from 'node:timers/promises';
-import { AggregatorClient } from '@unicitylabs/state-transition-sdk/lib/api/AggregatorClient.js';
-import { TrustBaseUpdater } from '@unicitylabs/state-transition-sdk/lib/api/bft/trustbase/TrustBaseUpdater.js';
 import { RootTrustBaseV2 } from '@unicitylabs/state-transition-sdk/lib/api/bft/trustbase/RootTrustBaseV2.js';
 import { DataHasher } from '@unicitylabs/state-transition-sdk/lib/crypto/hash/DataHasher.js';
 import { HashAlgorithm } from '@unicitylabs/state-transition-sdk/lib/crypto/hash/HashAlgorithm.js';
 import { CborMap } from '@unicitylabs/state-transition-sdk/lib/serialization/cbor/CborMap.js';
 import { CborMapEntry } from '@unicitylabs/state-transition-sdk/lib/serialization/cbor/CborMapEntry.js';
 import { CborSerializer as C } from '@unicitylabs/state-transition-sdk/lib/serialization/cbor/CborSerializer.js';
-import { TrustInput } from '@unicitylabs/native-bridge-plugin';
-import { hex, unhex } from '../src/hex.js';
-import { load } from '../src/store.js';
-import { bootstrapTrust, refreshTrust } from '../src/trust.js';
 import { Chain } from '../src/pos/chain.js';
 import { posAddresses } from '../src/pos/config.js';
 import { fifthValidator, JoinEvidence } from '../src/pos/join.js';
@@ -37,7 +30,6 @@ test('a pinned 4 → 5 handoff locates the first UC with a valid new-member sign
     new CborMapEntry(C.encodeTextString(id), C.encodeByteString((await key.sign(hash)).encode()))));
   const held = old.trust;
   const next = RootTrustBaseV2.decode(entry(C.encodeMap(new CborMap(signatures))));
-  const agg = new AggregatorClient('https://test.example');
   await held.history.append(next);
 
   // The first UC in epoch two can reach quorum with just the four incumbents.

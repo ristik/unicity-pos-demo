@@ -12,7 +12,6 @@ interface Wallet extends Pick<Session, 'bridge' | 'trust' | 'pins' | 'signer'> {
   release: Session['published']['release'];
   store: IdbKv;
   persistAuthority(trust: TrustInput): Promise<void>;
-  refreshAuthority(): Promise<TrustInput>;
 }
 import {
   AmbiguousBroadcast, FAILURE_PROOF_READS, ProofUnavailable, EvmReader, HttpJsonRpc, Nb2Error, RecoveryAuthority, RecoverySession, RpcError, TOPIC, WalletError,
