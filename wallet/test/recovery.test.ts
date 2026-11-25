@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { IDBFactory } from 'fake-indexeddb';
 import {
-  EvmReader, RecoveryAuthority, RecoverySession, RpcError, TEST_PARAMS, TOPIC, buildHistory, decodeSignedTx,
-  evidenceOf, recoveryRpcSource, verifyReturn, verdictAbi,
+  EvmReader, RecoveryAuthority, RecoverySession, RpcError, SELECTOR, TEST_PARAMS, TOPIC, buildHistory, decodeSignedTx,
+  evidenceOf, recoveryRpcSource, revertData, signTx, verifyReturn, verdictAbi,
   type JsonRpc, type GasModel, type RecoveryEvent,
 } from '@unicitylabs/native-bridge-plugin/nb2';
 import { DEFAULTS } from '../src/config.js';
@@ -12,6 +12,7 @@ import { IdbKv } from '../src/idb.js';
 import { burnerFrom } from '../src/keys.js';
 import { begin, end, installFetchTrace, reportStepFailure } from '../src/trace.js';
 import * as nb2 from '../src/nb2.js';
+import { encodeReturnBackup } from '../src/recovery.js';
 import { caps, recoveryFixture, selector } from './recovery-world.js';
 import { key } from './world.js';
 
@@ -41,6 +42,16 @@ test('continuation waits for finalized import, resumes the exact signed bytes an
   assert.ok(eligible.record.recovery);
   await nb2.burn(browser, eligible.returnId, kv, async (backup) => assert.ok(JSON.parse(backup).pending.burnRequest), undefined, caps);
   const rec = (await nb2.returnRecord(browser, hx(eligible.returnId)))!;
+  const nonce = await browser.bridge.evm.nonce(browser.signer.address);
+  const ordinary = await signTx(browser.signer, { chainId: cfg.chainId, nonce, maxFeePerGas: 15n,
+    maxPriorityFeePerGas: 1n, gas: 1_000_000n, to: cfg.vault, value: 0n, data: SELECTOR.redeem });
+  const durable = (await browser.bridge.journal.retForUpdate(rec.returnId))!;
+  durable.sends.push({ hash: hx(ordinary.hash), raw: hx(ordinary.raw), nonce: String(nonce), gas: '1000000', at: '0' });
+  durable.status = 'submitted';
+  await browser.bridge.journal.putReturn(durable);
+  const backup = async () => JSON.parse(await encodeReturnBackup(nb2.recoveryWallet(browser, kv),
+    (await nb2.returnRecord(browser, rec.returnId))!));
+  assert.equal((await backup()).handoff, 'active');
   const stored = `return/recovery/${hx(chain.domain)}/${rec.returnId}`;
   const read = async () => JSON.parse((await kv.get(stored))!);
 
@@ -71,15 +82,20 @@ test('continuation waits for finalized import, resumes the exact signed bytes an
   let sent = 0;
   let preflightData: string | undefined;
   let rejectSegmentLogs = false;
+  let hideRawTransaction = false;
   const interrupted: JsonRpc = {
     async call<T>(method: string, params: unknown[]): Promise<T> {
       if (rejectSegmentLogs && isSegmentLookup(method, params)) {
         throw new RpcError(200, -32000, 'primary-private-marker', { secret: 'primary-data' });
       }
+      if (hideRawTransaction && method === 'eth_getRawTransactionByBlockHashAndIndex') return null as T;
       // coldCall models mined changes; a finalized eth_call must not advance its cursor.
       if (method === 'eth_call' && typeof params[1] === 'object') {
         assert.equal((await read()).pending, undefined);
         preflightData = (params[0] as { data: string }).data;
+        if (preflightData === hx(SELECTOR.redeem)) {
+          throw new RpcError(200, 3, 'execution reverted', hx(revertData('StaleEndpoint', 0n, 2n)));
+        }
         assert.equal((params[0] as { from: string }).from, me.evmAddress);
         assert.equal((params[1] as { requireCanonical: boolean }).requireCanonical, true);
         return '0x' as T;
@@ -108,6 +124,16 @@ test('continuation waits for finalized import, resumes the exact signed bytes an
   assert.equal(checkpoint.state === 'checkpoint' && checkpoint.stage, 'Complete');
   assert.equal(sent, 1);
   assert.equal((await read()).pending, undefined);
+  assert.equal((await read()).cuts[0].nonce, String(nonce));
+  assert.equal((await read()).ordinaryHandoff, hx(ordinary.hash));
+  hideRawTransaction = true;
+  assert.equal((await backup()).handoff, 'active');
+  hideRawTransaction = false;
+  const exported = await backup();
+  assert.equal(exported.handoff, undefined);
+  assert.equal(exported.activePayer, undefined);
+  await session.verifyComplete(root.trust, unhex(exported.complete.location.proof), BigInt(exported.complete.seq));
+  assert.equal((await nb2.returnRecord(browser, rec.returnId))?.sends[0].hash, hx(ordinary.hash));
   // Force the real recovery step to ask all readers for the next certified segment.
   const evm = browser.bridge.evm;
   const state = evm.vaultState.bind(evm);
