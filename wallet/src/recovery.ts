@@ -219,7 +219,7 @@ function ordinaryEnvelope(w: Wallet, policy: PayerPolicy): ReturnAdmission['ordi
   return { encodedBytes: BigInt(Math.min(policy.signedBytes, policy.calldataBytes)), gas: policy.gas, gasFor: ordinaryGas(w) };
 }
 
-export function walletAdmission(w: Wallet, policy?: PayerPolicy, saveBackup?: SaveReturnBackup): ReturnAdmission {
+export function walletAdmission(w: Wallet, policy?: PayerPolicy, saveBackup?: SaveReturnBackup, replacing?: bigint): ReturnAdmission {
   return {
     ordinaryEnvelope: policy && ordinaryEnvelope(w, policy),
     checkOrdinary: w.release.recovery === undefined && policy === undefined ? undefined : async (rec, gas) => {
@@ -237,14 +237,14 @@ export function walletAdmission(w: Wallet, policy?: PayerPolicy, saveBackup?: Sa
       const release = recoveryRelease(w);
       await checkGraph(w, release);
       const payer = bytes(rec.payer ?? rec.recipient, 20);
-      const limits = await limitsOf(w, policy, payer, await reservedFees(w, rec, payer));
+      const limits = await limitsOf(w, policy, payer, await reservedFees(w, rec, payer, undefined, replacing), replacing);
       const a = uint(rec.a);
       const { segment } = await w.bridge.evm.vaultState(w.bridge.cfg.vault);
       const plan = await preflightRecovery(w.pins.gamma, bytes(rec.source), w.trust, buildParams(w.pins.build),
         release.deployment, release.calibration, limits, { ...release.backlog, signedStart: a, observed: segment < a ? a : segment },
         rec.sealReceipt ? bytes(rec.sealReceipt) : undefined);
       const calls = BigInt(plan.run.length) + plan.advance.calls + 1n;
-      if ((await w.bridge.evm.nonce(payer)) + calls - 1n > limits.maxNonce) {
+      if ((replacing ?? await w.bridge.evm.nonce(payer)) + calls - 1n > limits.maxNonce) {
         throw new Nb2Error('CapacityPreflight', 'recovery schedule exceeds the declared nonce horizon');
       }
       return { generation: hx(release.generation), calls: String(calls), totalFee: String(plan.totalFee),
@@ -258,20 +258,20 @@ export function walletAdmission(w: Wallet, policy?: PayerPolicy, saveBackup?: Sa
 
 /** Qualify a late ordinary burn for cold continuation under this payer's limits. */
 export async function qualifyExistingRecovery(w: Wallet, rec: ReturnRecord, policy: PayerPolicy): Promise<ReturnRecord> {
-  const { result } = await reconcileForPayout(w, rec, 'recovery', policy, false);
+  const { result, handoff } = await reconcileForPayout(w, rec, 'recovery', policy, false);
   if (result.state === 'needs-archive') archiveRequired(result.txHash);
   if (result.state === 'route-blocked') routeRequired(result);
   const current = await w.bridge.journal.retForUpdate(rec.returnId);
   if (current?.status === 'paid') return current;
   if (!current?.burned) throw new WalletError('NotPending', 'certify the exact burn before choosing recovery');
   if ((await loadRecovery(w, current))?.complete || current.recovery) return current;
-  current.recovery = await qualifyLineage(w, current, policy);
+  current.recovery = await qualifyLineage(w, current, policy, handoff?.nonce);
   await w.bridge.journal.putReturn(current);
   return current;
 }
 
-async function qualifyLineage(w: Wallet, rec: ReturnRecord, policy: PayerPolicy) {
-  const qualify = walletAdmission(w, policy).recover;
+async function qualifyLineage(w: Wallet, rec: ReturnRecord, policy: PayerPolicy, replacing?: bigint) {
+  const qualify = walletAdmission(w, policy, undefined, replacing).recover;
   if (!qualify) throw new Nb2Error('CapacityPreflight', 'qualified recovery release is required');
   return qualify({ ...rec, payer: hx(w.signer.address) });
 }
@@ -378,6 +378,8 @@ interface RecoveryJournal {
   signerEpochs?: Record<string, string>;
   /** Earlier settlement bytes replaced at the same payer nonce. Reconcile them without resubmitting. */
   replacedSettlements?: string[];
+  /** The ordinary send whose free nonce was used for the first continuation packet. */
+  ordinaryHandoff?: string;
   /** Signed local attempts whose work has been superseded by a certified peer cursor. */
   superseded?: string[];
   cuts: { cut: Exclude<Cut, { kind: 'settle' }>; location: Location; seq: string; nonce: string; priorSeq: string; state?: string; endpoint?: string; head?: string }[];
@@ -593,7 +595,8 @@ async function lowerRecoverySend(w: Wallet, rec: ReturnRecord, journal?: Recover
   }
 }
 
-async function reconcileForPayout(w: Wallet, rec: ReturnRecord, route: 'ordinary' | 'recovery', policy?: PayerPolicy, resubmit = true) {
+async function reconcileForPayout(w: Wallet, rec: ReturnRecord, route: 'ordinary' | 'recovery', policy?: PayerPolicy, resubmit = true): Promise<{ record: ReturnRecord; result: ReconcileResult;
+  handoff?: { hash: Uint8Array; nonce: bigint } }> {
   const first = await reconcileReturn(w, rec, policy, false);
   if (first.result.state === 'paid' || first.result.state === 'needs-archive') return first;
   rec = first.record;
@@ -604,8 +607,16 @@ async function reconcileForPayout(w: Wallet, rec: ReturnRecord, route: 'ordinary
     return { record: rec, result };
   }
   const ordinary = blockedOrdinary(rec);
-  if (ordinary && route === 'recovery') {
-    return { record: rec, result: ordinary };
+  let handoff: { hash: Uint8Array; nonce: bigint } | undefined;
+  const localOrdinary = ordinary && first.result.state === 'pending' && !rec.paidProof &&
+    eq(first.result.txHash, ordinary.txHash);
+  const resumed = localOrdinary && journal?.ordinaryHandoff === hx(ordinary.txHash);
+  if (ordinary && route === 'recovery' && !resumed) {
+    if (localOrdinary && policy && !journal?.pending) {
+      const nonce = await w.bridge.expiredOrdinaryNonce(bytes(rec.returnId, 32), w.signer.address, readers(w, policy));
+      if (nonce !== undefined) handoff = { hash: ordinary.txHash, nonce };
+    }
+    if (!handoff) return { record: rec, result: ordinary };
   }
   if (journal?.pending && route === 'ordinary') {
     const held = activeRecovery(rec, journal);
@@ -634,7 +645,9 @@ async function reconcileForPayout(w: Wallet, rec: ReturnRecord, route: 'ordinary
     }
     return { record: rec, result: { state: 'pending', txHash: lower.hash } as const };
   }
-  return first;
+  return route === 'recovery' && (resumed || handoff)
+    ? { record: rec, result: { state: 'not-paid' } as const, handoff }
+    : first;
 }
 
 /** Ordinary redeem shares payment closure and nonce reconciliation with recovery. */
@@ -664,6 +677,7 @@ export async function recoverStep(w: Wallet, rec: ReturnRecord, policy: PayerPol
   const archive = readers(w, policy);
   const first = await reconcileForPayout(w, rec, 'recovery', policy);
   if (first.result.state !== 'not-paid') return first.result;
+  const handoff = first.handoff;
   rec = first.record;
   if (!rec.recovery) rec = await qualifyExistingRecovery(w, rec, policy);
   const release = recoveryRelease(w);
@@ -690,7 +704,7 @@ export async function recoverStep(w: Wallet, rec: ReturnRecord, policy: PayerPol
   }
 
   {
-    const replacing = expired?.request.nonce;
+    const replacing = expired?.request.nonce ?? handoff?.nonce;
     if (journal.complete) {
       rec = { ...rec, recovery: await qualifySettlement(w, rec, policy, cursor.gap?.cursor?.next ?? uint(rec.a), replacing) };
     } else {
@@ -757,10 +771,10 @@ export async function recoverStep(w: Wallet, rec: ReturnRecord, policy: PayerPol
          limits.maxPriorityFeePerGas < replacementBid(expired.request.maxPriorityFeePerGas))) {
       throw new Nb2Error('CapacityPreflight', 'a pooled settlement replacement exceeds the payer bid limit');
     }
-    if (cut.kind === 'settle' || expired) {
+    if (cut.kind === 'settle' || expired || handoff) {
       const replaced = expired ? [...(journal.replacedSettlements ?? []).filter((raw) =>
         decodeSignedTx(bytes(raw)).request.nonce === nonce).map((raw) => decodeSignedTx(bytes(raw)).hash), expired.hash] : [];
-      const competing = await w.bridge.checkSettlement(bytes(rec.returnId, 32), archive, release.deployment.recovery, undefined, replaced);
+      const competing = await w.bridge.checkSettlement(bytes(rec.returnId, 32), archive, release.deployment.recovery, handoff?.hash, replaced);
       if (competing.state === 'paid') await retainPayment(w, rec, hx(competing.txHash));
       if (competing.state !== 'not-paid') return competing;
     }
@@ -768,7 +782,13 @@ export async function recoverStep(w: Wallet, rec: ReturnRecord, policy: PayerPol
       maxPriorityFeePerGas: limits.maxPriorityFeePerGas, gas: quote.gas, to, value: 0n, data: calldata });
     if (tx.raw.length > quote.signedBytes) throw new Nb2Error('CapacityPreflight', 'signed recovery packet exceeds its bound');
     await w.bridge.evm.checkReturnImport(w.bridge.cfg, requiredSignerEpoch, { ...tx.request, from: w.signer.address });
-    if (expired && await w.bridge.evm.nonce(w.signer.address, 'latest') !== nonce) {
+    if (handoff) {
+      const evm = w.bridge.evm;
+      if (await evm.nonce(w.signer.address, 'latest') !== nonce || await evm.nonce(w.signer.address) !== nonce) {
+        return { state: 'pending', txHash: handoff.hash };
+      }
+      journal.ordinaryHandoff = hx(handoff.hash);
+    } else if (expired && await w.bridge.evm.nonce(w.signer.address, 'latest') !== nonce) {
       return { state: 'pending', txHash: expired.hash };
     }
     if (!current.executionPayer) {
@@ -816,7 +836,8 @@ async function reconcilePendingPacket(w: Wallet, rec: ReturnRecord, release: Rel
     const stage = pending.cut.kind === 'advance' ? 'Gap advance' : cursor.gap ? 'Complete' : 'Progress';
     return { state: 'checkpoint', txHash: hash, stage, sequence: cursor.prior!.seq };
   };
-  const earlier = (journal.replacedSettlements ?? []).map((signed) => decodeSignedTx(bytes(signed)))
+  const ordinary = journal.ordinaryHandoff ? rec.sends.map((send) => send.raw) : [];
+  const earlier = [...(journal.replacedSettlements ?? []), ...ordinary].map((signed) => decodeSignedTx(bytes(signed)))
     .filter((tx) => eq(tx.from, from) && tx.request.nonce === request.nonce);
   let pruned = false;
   let failed = false;
