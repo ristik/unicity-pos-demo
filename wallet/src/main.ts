@@ -161,7 +161,7 @@ async function connect(): Promise<string> {
     settings, me, trust, published: published!, journal: kv, backup: backupIntents,
     refreshTrust: async () => {
       if (navigator.onLine === false) throw new Error('Trust history is unavailable offline');
-      await refreshWalletTrust(agg);
+      await refreshTrust(trust!, agg);
       return trust!;
     },
   });
@@ -771,7 +771,11 @@ function flowCard(): HTMLElement {
 
 let trustView: HTMLElement = h('p', { class: 'muted' }, 'Not loaded.');
 async function refreshWalletTrust(agg: AggregatorClient): Promise<number> {
-  return refreshTrust(need(trust, 'connect first'), agg);
+  const held = need(trust, 'connect first');
+  if (!session) return refreshTrust(held, agg);
+  const before = held.history.entries.length;
+  await session.bridge.syncTrust();
+  return held.history.entries.length - before;
 }
 
 async function showTrust(fetchNew: boolean): Promise<string> {

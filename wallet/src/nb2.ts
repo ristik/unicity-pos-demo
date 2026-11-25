@@ -132,7 +132,7 @@ export async function openSession(a: OpenArgs): Promise<Session> {
     bridgeKey: deriveBridgeKey(tagged('unicity-demo/nb2/seed/', a.me.secret)),
     backup: a.backup, refreshTrust, ...(a.rpc ? {} : { trustFreshnessMs: 15 * 60_000, requireImportedTipProfile: true }), receiptTimeoutMs: a.rpc ? 0 : 180_000, pollMs: a.rpc ? 0 : 1_000, ...(a.gas ? { gas: a.gas } : {}),
   });
-  return { bridge, get trust() { return heldTrust; }, published: a.published, pins: a.published.pins, signer: new LocalKeySigner(a.me.secret), owner: localOwner(a.me.secret), pub: a.me.publicKey, aggregator, backup: a.backup, refreshTrust };
+  return { bridge, get trust() { return heldTrust; }, published: a.published, pins: a.published.pins, signer: new LocalKeySigner(a.me.secret), owner: localOwner(a.me.secret), pub: a.me.publicKey, aggregator, backup: a.backup, refreshTrust: async () => { await bridge.syncTrust(); return heldTrust; } };
 }
 
 /**
