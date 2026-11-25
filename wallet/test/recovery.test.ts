@@ -69,6 +69,7 @@ test('continuation waits for finalized import, resumes the exact signed bytes an
     return undefined;
   };
   let sent = 0;
+  let preflightData: string | undefined;
   let rejectSegmentLogs = false;
   const interrupted: JsonRpc = {
     async call<T>(method: string, params: unknown[]): Promise<T> {
@@ -77,14 +78,17 @@ test('continuation waits for finalized import, resumes the exact signed bytes an
       }
       // coldCall models mined changes; a finalized eth_call must not advance its cursor.
       if (method === 'eth_call' && typeof params[1] === 'object') {
-        const signed = decodeSignedTx(unhex((await read()).pending.raw));
-        assert.equal((params[0] as { data: string }).data, hx(signed.request.data));
-        assert.equal((params[0] as { from: string }).from, hx(signed.from));
+        assert.equal((await read()).pending, undefined);
+        preflightData = (params[0] as { data: string }).data;
+        assert.equal((params[0] as { from: string }).from, me.evmAddress);
         assert.equal((params[1] as { requireCanonical: boolean }).requireCanonical, true);
         return '0x' as T;
       }
       const result = await rpc.call<T>(method, params);
-      if (method === 'eth_sendRawTransaction' && ++sent === 1) throw new Error('browser interrupted after send');
+      if (method === 'eth_sendRawTransaction') {
+        assert.equal(hx(decodeSignedTx(unhex(String(params[0]))).request.data), preflightData);
+        if (++sent === 1) throw new Error('browser interrupted after send');
+      }
       return result;
     },
   };
@@ -93,11 +97,10 @@ test('continuation waits for finalized import, resumes the exact signed bytes an
   chain.importedTipEpoch = 0n;
   await assert.rejects(redeem, { reason: 'ImportLag', retryable: true });
   assert.equal(sent, 0);
-  const pendingRaw = (await read()).pending.raw;
-  assert.ok(pendingRaw);
+  assert.equal((await read()).pending, undefined);
   chain.importedTipEpoch = 1n;
   await assert.rejects(redeem, /browser interrupted after send/);
-  assert.equal((await read()).pending.raw, pendingRaw);
+  assert.ok((await read()).pending.raw);
   kv = new IdbKv('a', factory);
   browser = await open(interrupted);
   const checkpoint = await redeem();
@@ -144,6 +147,11 @@ test('continuation waits for finalized import, resumes the exact signed bytes an
   assert.deepEqual(logged, [[status!.text]]);
   assert.doesNotMatch(JSON.stringify({ status, trace, logged }), /private-marker|archive-data|primary-data/);
   assert.equal(sent, 1, 'failed archive lookups must leave the continuation unsigned');
+  chain.importedTipEpoch = 0n;
+  await assert.rejects(redeem, { reason: 'ImportLag', retryable: true });
+  assert.equal((await read()).pending, undefined);
+  assert.equal(sent, 1);
+  chain.importedTipEpoch = 1n;
   assert.equal((await redeem()).state, 'paid');
   assert.equal(sent, 2);
   assert.equal(chain.vault.events.filter((event) => event.name === 'Paid').length, 1);

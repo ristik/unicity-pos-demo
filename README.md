@@ -15,7 +15,7 @@ The target is `https://pos.staging.unicity.network/demo/`, beside `/rpc`, `/aggr
 
 - `@unicitylabs/state-transition-sdk` 4.0.0-utb.c5840ef: the same tarball as `ristik/native-bridge-plugins/vendor/`. The provenance files are next to it.
 - `@unicitylabs/bridge-core` 0.1.0-bridge.2: built from `unicitynetwork/unicity-bridge` `deb2b86c`, the same tarball as in native-bridge-plugins.
-- `@unicitylabs/native-bridge-plugin` 0.1.0 was built at `0c589eacd68b` with authenticated UTB tip verification and durable proof retention. Its release requires the paired revision-2 verifier. The provenance file records the build and hashes.
+- `@unicitylabs/native-bridge-plugin` 0.1.0 was built at `ee386b0faae9` with authenticated UTB tip verification and durable proof retention. Its release requires the paired revision-2 verifier. The provenance file records the build and hashes.
 
 ## Build
 
