@@ -154,6 +154,7 @@ export interface Faults {
 }
 
 export class FakeChain implements JsonRpc {
+  public importedTipEpoch = 100n;
   public readonly blocks: Block[] = [];
   public readonly vault: VaultModel;
   public readonly balances = new Map<string, bigint>();
@@ -410,7 +411,7 @@ export class FakeChain implements JsonRpc {
         if (!r.ok) throw new RpcError(200, 3, `execution reverted: ${h(r.revert)}`, h(r.revert));
         return method === 'eth_estimateGas' ? q(120_000n) : '0x';
       }
-      case 'eth_getStorageAt': return h(u256(100n));
+      case 'eth_getStorageAt': return h(u256(this.importedTipEpoch));
       case 'eth_getCode': return h(this.code.get(p[0].slice(2)) ?? new Uint8Array());
       case 'eth_getBalance': return q(this.balanceOf(fromHex(p[0].slice(2))!));
       case 'eth_getTransactionCount': {

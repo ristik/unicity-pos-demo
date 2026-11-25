@@ -22,7 +22,7 @@ const isSegmentLookup = (method: string, params: unknown[]): boolean =>
 
 const gas: GasModel = { name: 'fixture without ordinary admission', depositGasLimit: () => 1_000_000n, redeemGasLimit: () => null };
 
-test('continuation resumes the exact signed bytes and reaches certified Paid', async () => {
+test('continuation waits for finalized import, resumes the exact signed bytes and reaches certified Paid', async () => {
   const { root, cfg, chain, deployment, recovery, aggregator, rpc, release, pins } = await recoveryFixture();
   const factory = new IDBFactory();
   const me = burnerFrom(key('browser holder'));
@@ -76,7 +76,13 @@ test('continuation resumes the exact signed bytes and reaches certified Paid', a
         throw new RpcError(200, -32000, 'primary-private-marker', { secret: 'primary-data' });
       }
       // coldCall models mined changes; a finalized eth_call must not advance its cursor.
-      if (method === 'eth_call' && typeof params[1] === 'object') return '0x' as T;
+      if (method === 'eth_call' && typeof params[1] === 'object') {
+        const signed = decodeSignedTx(unhex((await read()).pending.raw));
+        assert.equal((params[0] as { data: string }).data, hx(signed.request.data));
+        assert.equal((params[0] as { from: string }).from, hx(signed.from));
+        assert.equal((params[1] as { requireCanonical: boolean }).requireCanonical, true);
+        return '0x' as T;
+      }
       const result = await rpc.call<T>(method, params);
       if (method === 'eth_sendRawTransaction' && ++sent === 1) throw new Error('browser interrupted after send');
       return result;
@@ -84,8 +90,14 @@ test('continuation resumes the exact signed bytes and reaches certified Paid', a
   };
   browser = await open(interrupted);
   const redeem = () => nb2.redeem(browser, eligible.returnId, undefined, 0, 0, kv, caps);
+  chain.importedTipEpoch = 0n;
+  await assert.rejects(redeem, { reason: 'NotPending' });
+  assert.equal(sent, 0);
+  const pendingRaw = (await read()).pending.raw;
+  assert.ok(pendingRaw);
+  chain.importedTipEpoch = 1n;
   await assert.rejects(redeem, /browser interrupted after send/);
-  assert.ok((await read()).pending.raw);
+  assert.equal((await read()).pending.raw, pendingRaw);
   kv = new IdbKv('a', factory);
   browser = await open(interrupted);
   const checkpoint = await redeem();
