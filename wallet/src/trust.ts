@@ -10,7 +10,6 @@ import { TrustBaseUpdater } from '@unicitylabs/state-transition-sdk/lib/api/bft/
 import { TrustInput } from '@unicitylabs/native-bridge-plugin';
 
 import { hex, unhex } from './hex.js';
-import type { OriginFeed } from './origin.js';
 import { load, save } from './store.js';
 
 export interface EntryView {
@@ -104,50 +103,6 @@ async function updateHistory(trust: TrustInput, agg: AggregatorClient, signal: A
   }
 }
 
-/** Attempt both authorities independently and return whatever authenticated progress was made. */
-export async function refreshWalletAuthority(
-  trust: TrustInput,
-  refreshHistory: () => Promise<unknown>,
-  checkpoint?: Pick<OriginFeed, 'current' | 'refresh'>,
-  waitFromRound?: bigint,
-): Promise<{ trust: TrustInput; entriesAdded: number; historyFailed: boolean; checkpointFailed: boolean }> {
-  const previousLength = trust.history.entries.length;
-  const entriesAdded = () => trust.history.entries.length - previousLength;
-  const current = () => checkpoint?.current ?? trust;
-  let historyFailed = false;
-  let checkpointFailed = false;
-  // The updater appends to the history shared by all accepted origins. A
-  // late completion has no authority to replace the checkpoint in use.
-  const history = Promise.resolve().then(refreshHistory).catch(() => { historyFailed = true; });
-  const originAdvanced = () => waitFromRound !== undefined && (current().origin?.rootRound ?? 0n) > waitFromRound;
-  const ready = () => {
-    const { origin, history } = current();
-    return origin !== undefined && originAdvanced() && savedEpoch(history) >= origin.usableEpoch;
-  };
-  const result = () => {
-    const next = current();
-    const awaitingSave = next.origin && next.origin.usableEpoch > savedEpoch(next.history) &&
-      next.origin.usableEpoch <= (next.history.tip?.epoch ?? 0n);
-    return { trust: awaitingSave ? trust : next, entriesAdded: entriesAdded(), historyFailed, checkpointFailed };
-  };
-  if (checkpoint && ready()) return result();
-  try { await checkpoint?.refresh(); } catch { checkpointFailed = true; }
-  if (checkpoint && ready()) return result();
-  if (!checkpoint || waitFromRound === undefined || checkpointFailed || originAdvanced()) {
-    await history;
-    return result();
-  }
-  if (entriesAdded() > 0 && savedEpoch(trust.history) >= (trust.history.tip?.epoch ?? 0n)) return result();
-  const stop = new AbortController();
-  const poll = checkpoint.refresh(true, undefined, stop.signal).catch(() => { checkpointFailed = true; });
-  await Promise.race([
-    poll.then(async () => { if (!ready()) await history; }),
-    history.then(async () => { if (entriesAdded() === 0) await poll; }),
-  ]);
-  stop.abort();
-  return result();
-}
-
 export async function entries(trust: TrustInput): Promise<EntryView[]> {
   const h = trust.history;
   return Promise.all(h.entries.map(async (e) => ({
@@ -159,9 +114,4 @@ export async function entries(trust: TrustInput): Promise<EntryView[]> {
     totalWeight: e.totalWeight,
     members: e.members.map((m) => ({ nodeId: m.nodeId, weight: m.weight, key: hex(m.sigKey) })),
   })));
-}
-
-/** Attach independently authenticated B1 authority while preserving the history's storage scope. */
-export function withOrigin(trust: TrustInput, origin: NonNullable<TrustInput['origin']>): TrustInput {
-  return trust.withAuthenticatedOrigin(origin);
 }

@@ -1,4 +1,3 @@
-import { CHECKPOINT_PATH } from './origin.js';
 
 /**
  * What each step sent and received, for the "explain" drawer: every fetch the page makes (our JSON-RPC, the SDK's aggregator calls, the
@@ -65,7 +64,6 @@ function traceSource(input: string): { url: string; details: boolean; streaming?
   const base = globalThis.location?.origin ?? 'http://localhost';
   try {
     const url = new URL(input, base);
-    if (url.pathname === CHECKPOINT_PATH) return { url: url.origin === base ? CHECKPOINT_PATH : 'other endpoint', details: false, streaming: true };
     if (url.origin === base && TRACE_PATHS.has(url.pathname)) return { url: url.pathname, details: true };
     if (url.origin === base && url.pathname === '/archive-rpc') return { url: '/archive-rpc', details: false };
   } catch { /* leave unknown URLs redacted */ }

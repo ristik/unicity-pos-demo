@@ -115,7 +115,7 @@ Endpoints default to same-origin paths. The *Network settings* panel overrides t
 The bridge is opened with the plug-in's installation check: the RPC's chain ID, the vault's `config()` equal to the manifest's pinned Γ, and the vault's runtime code hash
 equal to the pinned one. A refusal (`BadDeployment`) means the manifest and the node are not the same deployment (a reset network, a wrong URL or a stale manifest), and nothing is sent.
 
-Build with the UTB genesis EntryID (`VITE_TRUST_PIN`), the SHA-256 of the authenticated release manifest (`VITE_NB2_RELEASE_SHA256`), and the PoS addresses from the same generation. The hashed manifest carries `trust.origin`. The public build checks the independent checkpoint at `/release/nb2-origin.json` on its pinned HTTPS release origin. It persists accepted advances per release digest, resumes from that checkpoint after reload, and refreshes on proof verification. UTB history and the B1 checkpoint advance independently. A release change still requires its own authenticated digest. The production build pins the `tn-public-20261122` release and PoS addresses in `.env.production`.
+Build with the pinned UTB genesis EntryID (`VITE_TRUST_PIN`), authenticated release SHA-256 (`VITE_NB2_RELEASE_SHA256`) and PoS addresses for the paired #1296 generation. The wallet refreshes authenticated UTB history on expiry or a newer signer epoch. Return submissions also require finalized destination import of the epochs they use.
 
 ### Return payer policy
 
@@ -227,7 +227,7 @@ node e2e/drive.mjs http://127.0.0.1:4173/demo/ \
   a:policy:payer.json a:pick:back a:step:plan "a:backup-file:$BACKUP_PATH" a:step:burn a:step:redeem
 ```
 
-For the public flow, tab B can fetch the checkpoint after the transfer is certified, then verify its received token offline. The headless commands above bring tab B online for the checkpoint refresh only. For a loopback test, copy the feed over authenticated HTTPS into the test release directory and build with `VITE_NB2_ORIGIN_CHANNEL` set to that loopback server's origin. Deploy a build using the public HTTPS origin.
+Tab B can verify a received token offline during its UTB freshness window if its history covers the signer epochs.
 
 For a local browser fixture, run `npx tsx test/http-fixture.ts "$RELEASE_DIR"` from `wallet/`. Source the generated `pins.env` before building, point `serve.mjs --gateway` at `http://127.0.0.1:18551`, and use the generated `payer.json`. The fixture auto-funds its simulated accounts. The headless driver substitutes the native picker with a write to the private file named by BACKUP_PATH. It exercises the browser flow without the public deployment.
 

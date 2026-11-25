@@ -18,7 +18,7 @@ import { IdbKv } from '../src/idb.js';
 import { burnerFrom } from '../src/keys.js';
 import * as nb2 from '../src/nb2.js';
 import { chooseReturnBackup } from '../src/return-backup.js';
-import { authenticatedOrigin, checkRevision } from '../src/release.js';
+import { checkReleaseDigest, checkRevision } from '../src/release.js';
 import { begin, end } from '../src/trace.js';
 import { getToken, initTokens, patchToken, putToken } from '../src/tokens.js';
 import { WORLD_GAS, key, setup, VAULT } from './world.js';
@@ -46,30 +46,13 @@ async function openWith(w: Awaited<ReturnType<typeof world>>, backup: (i: { next
   return (await w.open(new IdbKv('a', w.factory), backup)).s;
 }
 
-test('Mint tries one recovery lookup after its ordinary origin catch-up window', async (t) => {
-  const w = await world();
-  const { s } = await w.open();
-  const { intent } = await nb2.planDeposit(s, 8n);
-  await nb2.sendDeposit(s, intent);
-  const mint = s.bridge.mint.bind(s.bridge);
-  let now = 0;
-  let attempts = 0;
-  t.mock.method(performance, 'now', () => now);
-  t.mock.method(s.bridge, 'mint', async (i: bigint, options?: { recoverProof?: boolean }) => {
-    assert.equal(i, intent);
-    if (++attempts === 1) {
-      assert.equal(options, undefined);
-      now += 180_000;
-      throw new Nb2Error('SealEpoch', 'seal exceeds the authenticated B1 origin');
-    }
-    assert.deepEqual(options, { recoverProof: true });
-    return mint(i, options);
+test('deposit, mint, receive, burn and redeem through a local fixture without origin requests', async (t) => {
+  let originRequests = 0;
+  t.mock.method(globalThis, 'fetch', (input: RequestInfo | URL) => {
+    if (String(input instanceof Request ? input.url : input).includes('nb2-origin.json')) originRequests++;
+    throw new Error('unexpected HTTP call from the local fixture');
   });
-  assert.equal((await nb2.mint(s, intent)).amount, 8n);
-  assert.equal(attempts, 2);
-});
-
-test('deposit, mint, split, a transfer finished after a crash, return and redeem', async () => {
+  t.after(() => assert.equal(originRequests, 0));
   const w = await world();
   const { s, kv } = await w.open();
   await initTokens(kv, 'D.k');
@@ -234,15 +217,14 @@ test('the old-epoch check and the forgeries', async () => {
   assert.ok(VAULT.length === 20);
 });
 
-test('the B1 origin requires a pinned release digest', async () => {
+test('the deployment still requires a pinned release digest', async () => {
   const { s } = await (await world()).open();
   const digest = 'ab'.repeat(32);
   const release = { ...s.published, sha256: digest, release: {
-    pins: {}, trust: { origin: { usableEpoch: '2', rootRound: '400' } },
+    pins: {}, trust: {},
   } };
-  assert.deepEqual(authenticatedOrigin(release, digest), { usableEpoch: 2n, rootRound: 400n });
-  assert.throws(() => authenticatedOrigin(release, 'cd'.repeat(32)), /does not match/);
-  assert.throws(() => authenticatedOrigin({ ...release, release: { pins: {} } }, digest), /needs a B1 origin/);
+  checkReleaseDigest(release, digest);
+  assert.throws(() => checkReleaseDigest(release, 'cd'.repeat(32)), /does not match/);
 });
 
 test('a compatible plug-in upgrade keeps the pinned release revision', () => {
