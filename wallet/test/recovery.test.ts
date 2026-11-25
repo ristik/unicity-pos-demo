@@ -91,7 +91,7 @@ test('continuation waits for finalized import, resumes the exact signed bytes an
   browser = await open(interrupted);
   const redeem = () => nb2.redeem(browser, eligible.returnId, undefined, 0, 0, kv, caps);
   chain.importedTipEpoch = 0n;
-  await assert.rejects(redeem, { reason: 'NotPending' });
+  await assert.rejects(redeem, { reason: 'ImportLag', retryable: true });
   assert.equal(sent, 0);
   const pendingRaw = (await read()).pending.raw;
   assert.ok(pendingRaw);

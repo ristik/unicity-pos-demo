@@ -129,7 +129,7 @@ export async function openSession(a: OpenArgs): Promise<Session> {
   const bridge = await NativeBridgeV2.open({
     pins: a.published.pins, trust: a.trust, rpc: http, aggregator, journal: a.journal,
     bridgeKey: deriveBridgeKey(tagged('unicity-demo/nb2/seed/', a.me.secret)),
-    backup: a.backup, refreshTrust, ...(a.rpc ? {} : { trustFreshnessMs: 15 * 60_000, requireImportedTipProfile: true }), receiptTimeoutMs: a.rpc ? 0 : 180_000, pollMs: a.rpc ? 0 : 1_000, ...(a.gas ? { gas: a.gas } : {}),
+    backup: a.backup, refreshTrust, ...(a.rpc ? { unsafeTestTrust: true } : { trustFreshnessMs: 15 * 60_000 }), receiptTimeoutMs: a.rpc ? 0 : 180_000, pollMs: a.rpc ? 0 : 1_000, ...(a.gas ? { gas: a.gas } : {}),
   });
   return { bridge, get trust() { return heldTrust; }, published: a.published, pins: a.published.pins, signer: new LocalKeySigner(a.me.secret), owner: localOwner(a.me.secret), pub: a.me.publicKey, aggregator, backup: a.backup };
 }
@@ -168,9 +168,9 @@ export async function finishBackup(s: Session, intent: bigint): Promise<boolean>
 export const reasonOf = (e: unknown): string => (e instanceof WalletError ? e.reason : e instanceof Nb2Error ? e.rule : '');
 
 /** Refusals that mean "not yet": call again after a block or a moment. */
-export const RETRYABLE = ['CompanionUnknown', 'Unconfirmed', 'NotPending', 'NoEntryForEpoch'];
+export const RETRYABLE = ['CompanionUnknown', 'Unconfirmed', 'NotPending', 'NoEntryForEpoch', 'TrustSyncRequired'];
 /** The ones a step that reads chain evidence waits out (a certificate not served yet, a trust history to extend). */
-export const NOT_YET = ['CompanionUnknown', 'Unconfirmed', 'NoEntryForEpoch'];
+export const NOT_YET = ['CompanionUnknown', 'Unconfirmed', 'NoEntryForEpoch', 'TrustSyncRequired'];
 
 /** F again while it refuses with a reason in WHICH, up to TRIES times; NOTE is told the first time and every tenth. */
 export async function retry<T>(f: () => Promise<T>, note: (reason: string) => void = () => undefined, tries = 120, ms = 2_000, which = RETRYABLE): Promise<T> {
@@ -192,7 +192,7 @@ export async function retry<T>(f: () => Promise<T>, note: (reason: string) => vo
  * or sent: the burn is intact, and the redeem is built again a moment later.
  */
 export function isRegistryLag(e: unknown): boolean {
-  return e instanceof Nb2Error && e.rule === 'VerifierRefused' && e.inner?.rule === 'QuorumNotMet';
+  return e instanceof WalletError && e.reason === 'ImportLag' || e instanceof Nb2Error && e.rule === 'VerifierRefused' && e.inner?.rule === 'QuorumNotMet';
 }
 export const REGISTRY_LAG_MS = 120_000;
 
@@ -337,7 +337,7 @@ export async function redeem(s: Session, returnId: Uint8Array, note: (m: string)
       break;
     } catch (e) {
       if (!isRegistryLag(e)) throw e;
-      if (!refusal) note('QuorumNotMet: waiting for possible seal registry lag');
+      if (!refusal) note('Waiting for B1 registry import');
       refusal = e;
     }
   }

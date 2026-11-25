@@ -1,13 +1,13 @@
 {
   "repository": "https://github.com/ristik/native-bridge-plugins.git",
-  "commit": "5c8fc58e0811368c6d27e6574808c59fb3d90aee",
+  "commit": "0c589eacd68bf89117119abd11e8eda6b6d781da",
   "branch": "fix/1295-wallet-tip",
   "directory": "packages/native-bridge-plugin",
   "name": "@unicitylabs/native-bridge-plugin",
   "version": "0.1.0",
   "tarball": "unicitylabs-native-bridge-plugin-0.1.0.tgz",
-  "sha256": "62169d827bd227c7c1f338cd52a1f0d9520c7d5d16b44e0fee7753f6512256ee",
-  "integrity": "sha512-hbyUDagZOD+PcRSvE0WTMLS/WlD2WhDgqcxxmaX+2I95rMjspjGnFg6nWkkMXM4S1V/hiduEybhQZWWIoDmqxg==",
+  "sha256": "eee0a87e5a48c8d7996e806f1a84a38bb3c839c1afc34e105731dd34377cd930",
+  "integrity": "sha512-f6l03+p7hZ/kIgr8x5bdq1Y4/zDz527c4xNmtpCdBj2AOHSvm/HcLBOvGFcsh2dSBhzkcSQCrKJSfsdJvXhYkw==",
   "build": [
     "git archive <commit> | tar -x",
     "npm install --ignore-scripts (repo root, with its vendored SDK and bridge-core tarballs)",

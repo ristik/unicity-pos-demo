@@ -91,12 +91,11 @@ export class Handoff {
 }
 
 /**
- * The receiver's check: the plug-in verifies the whole token offline (its receipt-backed origin, its lineage and every certificate under the held
- * trust history; nothing is sent), and its current owner is this key.
+ * Check the incoming lineage and its receipt's canonical child, then confirm the current owner is this key.
  */
 export async function acceptToken(bridge: NativeBridgeV2, bytesHex: string, myPublicKey: Uint8Array): Promise<{ bytes: Uint8Array; verified: { tokenId: Uint8Array; amount: bigint; owner: Uint8Array | null } }> {
   const bytes = unhex(bytesHex);
-  const verified = await bridge.verifyToken(bytes);
+  const verified = await bridge.verifyReceivedToken(bytes);
   if (verified.owner === null || !eqBytes(verified.owner, myPublicKey)) throw new Error('the token verifies, but its owner is another key: not addressed to this wallet');
   return { bytes, verified };
 }
