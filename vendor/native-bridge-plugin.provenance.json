@@ -1,13 +1,13 @@
 {
   "repository": "https://github.com/ristik/native-bridge-plugins.git",
-  "commit": "ef90dc40d726c6009945397ef9f8b7722a12e435",
+  "commit": "c012887fc372d4718e304370ad4537438b478b85",
   "branch": "fix/vanished-claim-horizon",
   "directory": "packages/native-bridge-plugin",
   "name": "@unicitylabs/native-bridge-plugin",
   "version": "0.1.0",
   "tarball": "unicitylabs-native-bridge-plugin-0.1.0.tgz",
-  "sha256": "22da30cbe605194a4248e593b7e4b0caadba145fb0749eaed6e2edd694a4ca5c",
-  "integrity": "sha512-N9osDbUiwm6TJeH+IJAMt/+tfoNxNivMPoClCUtyPy9tb7jwerHz7vCbEjp6/SN/+gm32EIB/1QoHzVbRzt+bw==",
+  "sha256": "669415d71db550eade3cb68d1dbd30b9060ec7fcdc42279ac54d611b048719c6",
+  "integrity": "sha512-Z1evHWjfqKJ7ecuOpRD9kTzMNpJZOfunTYyAy4PL4Bxeoq6dBh03wIN6N87CYzQLTn/jVtnM3fxXAiQ/mQzHCg==",
   "build": [
     "git archive <commit> | tar -x",
     "npm install --ignore-scripts (repo root, with its vendored SDK and bridge-core tarballs)",
@@ -16,12 +16,12 @@
     "npm pack --ignore-scripts"
   ],
   "verified": "NB2 v1.1 authenticated UTB tip, canonical child-bound Mint receipts, and durable certification. The SDK and bridge-core tarballs match the demo copies byte for byte.",
-  "notes": "native-bridge-plugins #96 (PR head; re-pin to its merge commit on main once merged): an unproven peer Paid claim no reader holds canonically is dropped VANISHED_CLAIM_HORIZON (64) blocks after the return first saw one, and the own payout proceeds (the vault's AlreadyPaid refuses a double payment); on top of #95 (06e224c7) and #94 (b752c2a1). Ships with the generation whose manifest names this commit.",
+  "notes": "native-bridge-plugins #96 (PR head; re-pin to its merge commit on main once merged): an unproven peer Paid claim no reader holds canonically is dropped VANISHED_CLAIM_HORIZON (64) blocks after the return first saw one (peerClaimSince only lowered, to the lowest reader head), and the own payout proceeds (the vault's AlreadyPaid refuses a double payment); on top of #95 (06e224c7) and #94 (b752c2a1). Ships with the generation whose manifest names this commit.",
   "toolchain": {
     "node": "24.22.3",
     "npm": "11.21.2",
     "zlib": "1.4",
     "note": "npm pack output is gzip-dependent: this toolchain reproduces sha256; node 22 (npm 10.9, zlib 1.3.1) packs the same tar into a different gzip. tarSha256 (the gunzipped tarball) is toolchain-independent."
   },
-  "tarSha256": "75bd1e205f928fba25cb241c7594008429edfdca696c2144ff28bfa1cab995b8"
+  "tarSha256": "b2995216aefec5fa5892cb0dfa01dddf2d9e07bf1e3dc5f940257a0886f70e5a"
 }
