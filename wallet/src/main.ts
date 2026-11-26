@@ -485,7 +485,7 @@ const STEPS: StepDef[] = [
         throw new Error(`The RPC no longer serves ${r.missing ?? 'part of the proof'} for 0x${hex(r.txHash)}, so the payment cannot be proven from it. Run Redeem again later; if this persists, add an archive RPC that holds that block to the payer policy.`);
       }
       if (r.state === 'vanished') {
-        throw new Error(`Payment 0x${hex(r.txHash)} by another wallet was seen and is no longer on the chain. Nothing is signed while it is held; it is paid if that transaction lands again.`);
+        throw new Error(`Payment 0x${hex(r.txHash)} by another wallet was seen and is no longer on the chain. Nothing is signed while it is held; it is paid if that transaction lands again. About 64 blocks after it was first seen, Run Redeem pays from this wallet (the vault never pays twice).`);
       }
       if (r.state === 'route-blocked') throw new Error(`The ${r.route} route still has a transaction to reconcile: 0x${hex(r.txHash)}`);
       if (r.state === 'not-paid' && r.lastFailure) {
