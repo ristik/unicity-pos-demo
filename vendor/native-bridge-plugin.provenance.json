@@ -1,13 +1,13 @@
 {
   "repository": "https://github.com/ristik/native-bridge-plugins.git",
-  "commit": "50a64cba68974bdbd534f097e160813a9c6876ea",
-  "branch": "fix/1295-wallet-tip",
+  "commit": "14974d0ce275b61abc3620c021130896197978f1",
+  "branch": "main",
   "directory": "packages/native-bridge-plugin",
   "name": "@unicitylabs/native-bridge-plugin",
   "version": "0.1.0",
   "tarball": "unicitylabs-native-bridge-plugin-0.1.0.tgz",
-  "sha256": "52c00c1c498dc27e436af70192867759841d9b4eccbf4ea4c0c5db5f8b1d951c",
-  "integrity": "sha512-hniGlKdcUuETysvq8CqS1ACmz5fewm7SKHd7/00kPGnbuixjz717sjaafR3ctd2LobTKS906tBYU1Jwa0tUYow==",
+  "sha256": "045972befc601f98755cbc4cb699cf0ba17f1a7afecae7204b7def40d1334ece",
+  "integrity": "sha512-FT4yE6B8cRE3G0JZcbGckigOzMqbK1LCIdh9spnM5yqhjPBY7NUjLvK3XiyZTciyh9+YVsj7cgbgkairLd0aKQ==",
   "build": [
     "git archive <commit> | tar -x",
     "npm install --ignore-scripts (repo root, with its vendored SDK and bridge-core tarballs)",
@@ -16,5 +16,5 @@
     "npm pack --ignore-scripts"
   ],
   "verified": "NB2 v1.1 authenticated UTB tip, canonical child-bound Mint receipts, and durable certification. The SDK and bridge-core tarballs match the demo copies byte for byte.",
-  "notes": "Release with the paired revision-2 verifier and #1296 generation."
+  "notes": "native-bridge-plugins #93: typed retryable RPC errors, jittered backoff, transportRetry, WalletError PolicyRequired. Ships with the generation whose manifest names this commit."
 }
