@@ -66,7 +66,7 @@ export class JoinEvidence {
       this.first = undefined;
     }
     if (this.first) return;
-    const latest = await this.reader.blockNumber() - 1n;
+    const latest = await this.reader.saneHead() - 1n;
     if (latest < 1n) return;
     if (this.high === undefined) {
       const tip = await this.certificate(trust, latest);
