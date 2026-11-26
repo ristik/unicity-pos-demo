@@ -11,6 +11,7 @@ test('default payer policy follows the release limits and the gateway gas price'
   assert.equal(p.maxPriorityFeePerGas, 5_000_000n);
   assert.equal(p.maxTransactionFee, 30_000_000n * 50_000_000n);
   assert.equal(p.feeBudget, REFERENCE_POLICY.feeBudget);
+  assert.ok(p.feeBudget >= p.maxTransactionFee!);
   assert.equal(p.maxNonce, 100n);
   assert.deepEqual(p.archives, []);
 });
@@ -30,4 +31,11 @@ test('default payer policy falls back to the reference constants', () => {
   assert.equal(p.signedBytes, 524_288);
   assert.equal(p.calldataBytes, 393_216);
   assert.equal(p.maxFeePerGas, 10_000_000n);
+});
+
+test('default payer policy keeps the fee budget above several maximal transactions at a high gas price', () => {
+  const p = readPayerPolicy(defaultPayerPolicy({ gas: 24_000_000n, gasPrice: 5_000_000_000n }));
+  assert.equal(p.maxTransactionFee, 24_000_000n * 50_000_000_000n);
+  assert.ok(p.feeBudget >= p.maxTransactionFee!);
+  assert.equal(p.feeBudget, p.maxTransactionFee! * 20n);
 });

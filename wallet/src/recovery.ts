@@ -75,10 +75,13 @@ export function defaultPayerPolicy(release: { gas?: bigint; signedBytes?: number
   const num = (v: number | bigint | undefined, d: number): number => (v !== undefined && Number(v) > 0 && Number.isSafeInteger(Number(v)) ? Number(v) : d);
   const price = release.gasPrice !== undefined && release.gasPrice > r.gasPrice ? release.gasPrice : r.gasPrice;
   const maxFeePerGas = price * 10n;
+  const maxTransactionFee = gas * maxFeePerGas;
+  // room for several transactions at any price: at least the reference budget, and 20 maximal transactions
+  const feeBudget = maxTransactionFee * 20n > r.feeBudget ? maxTransactionFee * 20n : r.feeBudget;
   return JSON.stringify({
     gas: gas.toString(), signedBytes: num(release.signedBytes, r.signedBytes), calldataBytes: num(release.calldataBytes, r.calldataBytes),
     maxNonce: r.maxNonce.toString(), maxFeePerGas: maxFeePerGas.toString(), maxPriorityFeePerGas: price.toString(),
-    maxTransactionFee: (gas * maxFeePerGas).toString(), feeBudget: r.feeBudget.toString(), archives: [],
+    maxTransactionFee: maxTransactionFee.toString(), feeBudget: feeBudget.toString(), archives: [],
   }, null, 2);
 }
 

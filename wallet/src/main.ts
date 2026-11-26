@@ -105,7 +105,9 @@ async function step(key: string, fn: () => Promise<string | void>, prepare?: () 
     const msg = await fn();
     status.set(key, { ok: true, text: msg ?? 'done' });
   } catch (e) {
-    status.set(key, reportStepFailure(e));
+    // the plug-in decides when a policy is required: only that refusal is turned into a pointer to the defaults button
+    status.set(key, reportStepFailure(e instanceof Error && e.name === 'Nb2Error' && e.message.includes('explicit payer limits are required')
+      ? new Error('This return needs a payer policy. Open "Return payer policy" and paste explicit ceilings, or click "use testnet defaults" and check them, then run again.') : e));
   } finally {
     end(t);
     traces.set(key, t);
@@ -264,12 +266,7 @@ const policyInput = h('textarea', { id: 'return-policy', rows: '5', 'aria-label'
 // Clear policies retained by the earlier build. The current input stays in this page only.
 remove('return.policy');
 const coldRoute = h('input', { type: 'checkbox', 'aria-label': 'use continuation if ordinary no longer fits' });
-const policy = () => {
-  if (!policyInput.value.trim()) {
-    throw new Error('Set the return payer policy first: open "Return payer policy" and paste explicit ceilings, or click "use testnet defaults" and check them.');
-  }
-  return readPayerPolicy(policyInput.value);
-};
+const policy = () => policyInput.value.trim() ? readPayerPolicy(policyInput.value) : undefined;
 /** Fill the textarea from the connected deployment's release limits and the gateway's current gas price. The owner reviews it before use. */
 async function fillDefaultPolicy(): Promise<void> {
   const s = sess();
