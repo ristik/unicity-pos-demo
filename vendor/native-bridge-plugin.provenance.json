@@ -1,13 +1,13 @@
 {
   "repository": "https://github.com/ristik/native-bridge-plugins.git",
-  "commit": "b752c2a1431a6520db910c6076c4247dfbee9f09",
+  "commit": "06e224c744dce984753a0b5e616078e923ca8566",
   "branch": "main",
   "directory": "packages/native-bridge-plugin",
   "name": "@unicitylabs/native-bridge-plugin",
   "version": "0.1.0",
   "tarball": "unicitylabs-native-bridge-plugin-0.1.0.tgz",
-  "sha256": "5b6f691aa9a1a88ff07f6bd9d2cc3cf46bedd2b85dce726e4adc2c44073bdccc",
-  "integrity": "sha512-u0MRgOz29sSpxOhusL6BwdCaWHvna5mP0By8U1Wc5i1hO0WX/9shDeypP066lpbEskQmR07ytG1Z11BJPeyIAA==",
+  "sha256": "3d345c3ce31ff74cedb9f9815d0630d28b29ad7019665d66dfabe9419ab7a891",
+  "integrity": "sha512-+TE5KIZDK6mrkEoV+n8i2pIZH9n55HpsMFPZ7oKvihBwru4L1qIEcl31T2lf3hPx/nWJZenauSMvJsyc9CGZGg==",
   "build": [
     "git archive <commit> | tar -x",
     "npm install --ignore-scripts (repo root, with its vendored SDK and bridge-core tarballs)",
@@ -16,12 +16,12 @@
     "npm pack --ignore-scripts"
   ],
   "verified": "NB2 v1.1 authenticated UTB tip, canonical child-bound Mint receipts, and durable certification. The SDK and bridge-core tarballs match the demo copies byte for byte.",
-  "notes": "native-bridge-plugins #94 (merged as b752c2a1): needs-archive only on a node's own pruned answer, never after a count of reads; a payout not certified yet stays pending; needs-archive names the missing component. Ships with the generation whose manifest names this commit.",
+  "notes": "native-bridge-plugins #95 (merged as 06e224c7): a seen payout or failed receipt that left the chain is offered again as the identical bytes (own send or continuation settle packet) or reported as vanished (another party's payment), CERTIFICATION_DEPTH past it; on top of #94 (b752c2a1): needs-archive only on a node's own pruned answer. Ships with the generation whose manifest names this commit.",
   "toolchain": {
     "node": "24.22.3",
     "npm": "11.21.2",
     "zlib": "1.4",
     "note": "npm pack output is gzip-dependent: this toolchain reproduces sha256; node 22 (npm 10.9, zlib 1.3.1) packs the same tar into a different gzip. tarSha256 (the gunzipped tarball) is toolchain-independent."
   },
-  "tarSha256": "229a0bd92068170148ddaa59ce631d99c61c17993fe2a9516e71320811b65512"
+  "tarSha256": "e6a7e970b4ed8b780a5635a347a879fecd538b44a878cbff0b7bb5ad49a07d30"
 }

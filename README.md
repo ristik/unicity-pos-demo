@@ -15,7 +15,7 @@ The target is `https://pos.staging.unicity.network/demo/`, beside `/rpc`, `/aggr
 
 - `@unicitylabs/state-transition-sdk` 4.0.0-utb.c5840ef: the same tarball as `ristik/native-bridge-plugins/vendor/`. The provenance files are next to it.
 - `@unicitylabs/bridge-core` 0.1.0-bridge.2: built from `unicitynetwork/unicity-bridge` `deb2b86c`, the same tarball as in native-bridge-plugins.
-- `@unicitylabs/native-bridge-plugin` 0.1.0 was built at `b752c2a1431a` (native-bridge-plugins #94: a payout not certified yet stays pending; needs-archive only on a node's pruned answer, naming what is missing; on top of #93: typed retryable RPC errors, bounded jittered backoff, `PolicyRequired`) on top of authenticated UTB tip verification and durable proof retention. Its release requires the paired revision-2 verifier. The provenance file records the build and hashes.
+- `@unicitylabs/native-bridge-plugin` 0.1.0 was built at `06e224c744dc` (native-bridge-plugins #95: a seen payout that left the chain is offered again or reported as vanished; on top of #94: a payout not certified yet stays pending; needs-archive only on a node's pruned answer, naming what is missing; on top of #93: typed retryable RPC errors, bounded jittered backoff, `PolicyRequired`) on top of authenticated UTB tip verification and durable proof retention. Its release requires the paired revision-2 verifier. The provenance file records the build and hashes.
 
 ## Build
 
