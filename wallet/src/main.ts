@@ -489,7 +489,7 @@ const STEPS: StepDef[] = [
         const rule = r.lastFailure.error;
         throw new Error(`Mined refusal: ${rule?.rule ?? 'unknown'}${rule?.inner ? ` (${rule.inner.rule})` : ''}`);
       }
-      if (r.state !== 'paid') throw new Error(r.state === 'pending' ? `Payment 0x${hex(r.txHash)} is sent and waiting for its block's certificate. Run Redeem again to reconcile it.` : 'The burn is intact. Check the payer policy and retry.');
+      if (r.state !== 'paid') throw new Error(r.state === 'pending' ? `Payment 0x${hex(r.txHash)} is sent and not certified yet (waiting to be mined or for its block's certificate). Run Redeem again to reconcile it.` : 'The burn is intact. Check the payer policy and retry.');
       await patchToken(t.id, { phase: 'redeemed', returnProgress: undefined, redeemTx: `0x${hex(r.txHash)}` });
       await refreshBalances();
       return `paid ${fmtUnits(BigInt(t.amountWei))} UCT to ${t.recipient?.slice(0, 10)}… in block ${r.blockNumber}`;

@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/ristik/native-bridge-plugins.git",
-  "commit": "49a379163e26a0cb4e17c3bcf3f180ccc426f7e9",
-  "branch": "fix/redeem-needs-archive",
+  "commit": "b752c2a1431a6520db910c6076c4247dfbee9f09",
+  "branch": "main",
   "directory": "packages/native-bridge-plugin",
   "name": "@unicitylabs/native-bridge-plugin",
   "version": "0.1.0",
@@ -16,5 +16,12 @@
     "npm pack --ignore-scripts"
   ],
   "verified": "NB2 v1.1 authenticated UTB tip, canonical child-bound Mint receipts, and durable certification. The SDK and bridge-core tarballs match the demo copies byte for byte.",
-  "notes": "native-bridge-plugins fix/redeem-needs-archive (PR head, re-pin to the merge commit of main once merged): needs-archive only on a node's own pruned answer, never after a count of reads; a payout not certified yet stays pending; needs-archive names the missing component. Ships with the generation whose manifest names this commit."
+  "notes": "native-bridge-plugins #94 (merged as b752c2a1): needs-archive only on a node's own pruned answer, never after a count of reads; a payout not certified yet stays pending; needs-archive names the missing component. Ships with the generation whose manifest names this commit.",
+  "toolchain": {
+    "node": "24.22.3",
+    "npm": "11.21.2",
+    "zlib": "1.4",
+    "note": "npm pack output is gzip-dependent: this toolchain reproduces sha256; node 22 (npm 10.9, zlib 1.3.1) packs the same tar into a different gzip. tarSha256 (the gunzipped tarball) is toolchain-independent."
+  },
+  "tarSha256": "229a0bd92068170148ddaa59ce631d99c61c17993fe2a9516e71320811b65512"
 }
