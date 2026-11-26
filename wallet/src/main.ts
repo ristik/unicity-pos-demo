@@ -750,7 +750,8 @@ function flowCard(): HTMLElement {
       ...toks.map((x) => h('option', { value: x.id, selected: x.id === currentId }, `${x.id.startsWith('rx-') ? 'received' : x.parent ? `part ${x.id.endsWith('.back') ? 'back' : 'keep'} of ${x.parent}` : `deposit ${x.id.slice(1)}`} · ${fmtUnits(BigInt(x.amountWei))} UCT · ${x.phase === 'received' ? 'received, not verified' : x.phase}${x.pending ? ' · transfer pending' : ''}${x.burning ? ' · burn in progress' : ''}`)))
     : h('span', { class: 'muted' }, 'none yet: deposit some UCT');
   peerSelect.replaceChildren(...[...peers.values()].map((p) => h('option', { value: p.profile }, `tab ${p.profile.toUpperCase()}`)));
-  if (!peers.size) peerSelect.append(h('option', { value: '' }, 'no other tab'));
+  // The handoff is opt-in in every tab (see enableHandoff), so say which tab still has to opt in.
+  if (!peers.size) peerSelect.append(h('option', { value: '' }, handoff ? 'no other tab yet: click "take part in handoff" in the other tab' : 'click "take part in handoff" here and in the other tab'));
   return card('Asset flow',
     h('div', { class: 'row' }, h('span', {}, 'token: '), picker, t?.tokenId ? mono(t.tokenId) : ''),
     h('details', {}, h('summary', {}, 'Return payer policy'), h('p', { class: 'what' }, 'Set explicit gas, byte, nonce and fee ceilings, plus optional public archive origins or /archive-rpc. The policy stays in this tab until reload. Use one payer for the full return.'), policyInput),

@@ -27,8 +27,8 @@ A minimal in-browser wallet for the Unicity demo: Vite + TypeScript, no framewor
   - **Redeem:** reads one `SegmentSealed` log per segment since `a`, builds the gap proofs, simulates, signs and sends, and waits for the payment's
     block to be certified. Right after a burn the verifier can answer `QuorumNotMet` until the EVM chain's seal registry has imported the burn's root
     round (bft-core#1125); the step waits up to 2 minutes and builds again (nothing is sent meanwhile).
-- **Two-tab handoff** (`src/handoff.ts`): *open tab B* opens `?w=b`, a second wallet with its own key and storage. The two tabs find each other over a
-  BroadcastChannel. The sender transfers the token to the other tab's key, stores the token as *sent*, and posts the token file; *Resend*
+- **Two-tab handoff** (`src/handoff.ts`): *open tab B* opens `?w=b`, a second wallet with its own key and storage. Click *take part in handoff* in **both** tabs
+  (it is opt-in, so a key import can never race a sender); the two tabs then find each other over a BroadcastChannel. The sender transfers the token to the other tab's key, stores the token as *sent*, and posts the token file; *Resend*
   posts it again if the other tab was closed or missed it. The receiver stores the file the moment it arrives (as *received, not verified*),
   then verifies it offline (`bridge.verifyToken`: the receipt-backed origin, the lineage and every certificate under the held trust history) and checks
   that it is the current owner as soon as the page is connected and free. *Verify received token* retries it. Messages that are not well formed are
