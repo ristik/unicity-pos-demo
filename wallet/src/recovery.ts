@@ -61,6 +61,27 @@ export function readPayerPolicy(content: string): PayerPolicy {
     feeBudget: uint(p.feeBudget), archives: (p.archives ?? []).map(publicArchive) };
 }
 
+/** The reference wallet's policy, used where the deployment does not publish a value (native-bridge-plugins docs/nb2-wallet-guide.md). */
+export const REFERENCE_POLICY = { gas: 24_000_000n, signedBytes: 524_288, calldataBytes: 393_216, maxNonce: 100n,
+  gasPrice: 1_000_000n, feeBudget: 500_000_000_000_000_000n } as const;
+
+/**
+ * Testnet-default payer policy JSON for the connected deployment: gas, byte ceilings from the release, fee caps scaled from the gateway's
+ * current eth_gasPrice with the reference ratio (maxFee = 10x, tip = 1x), floored at the reference's 10^6 wei price.
+ */
+export function defaultPayerPolicy(release: { gas?: bigint; signedBytes?: number | bigint; calldataBytes?: number | bigint; gasPrice?: bigint }): string {
+  const r = REFERENCE_POLICY;
+  const gas = release.gas && release.gas > 0n ? release.gas : r.gas;
+  const num = (v: number | bigint | undefined, d: number): number => (v !== undefined && Number(v) > 0 && Number.isSafeInteger(Number(v)) ? Number(v) : d);
+  const price = release.gasPrice !== undefined && release.gasPrice > r.gasPrice ? release.gasPrice : r.gasPrice;
+  const maxFeePerGas = price * 10n;
+  return JSON.stringify({
+    gas: gas.toString(), signedBytes: num(release.signedBytes, r.signedBytes), calldataBytes: num(release.calldataBytes, r.calldataBytes),
+    maxNonce: r.maxNonce.toString(), maxFeePerGas: maxFeePerGas.toString(), maxPriorityFeePerGas: price.toString(),
+    maxTransactionFee: (gas * maxFeePerGas).toString(), feeBudget: r.feeBudget.toString(), archives: [],
+  }, null, 2);
+}
+
 /** Authenticated archives belong behind a fixed same-origin route. A direct reader must be public. */
 function publicArchive(input: string): string {
   if (input === '/archive-rpc') return input;
