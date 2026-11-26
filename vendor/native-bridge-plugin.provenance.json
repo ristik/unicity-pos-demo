@@ -1,13 +1,13 @@
 {
   "repository": "https://github.com/ristik/native-bridge-plugins.git",
-  "commit": "14974d0ce275b61abc3620c021130896197978f1",
-  "branch": "main",
+  "commit": "49a379163e26a0cb4e17c3bcf3f180ccc426f7e9",
+  "branch": "fix/redeem-needs-archive",
   "directory": "packages/native-bridge-plugin",
   "name": "@unicitylabs/native-bridge-plugin",
   "version": "0.1.0",
   "tarball": "unicitylabs-native-bridge-plugin-0.1.0.tgz",
-  "sha256": "045972befc601f98755cbc4cb699cf0ba17f1a7afecae7204b7def40d1334ece",
-  "integrity": "sha512-FT4yE6B8cRE3G0JZcbGckigOzMqbK1LCIdh9spnM5yqhjPBY7NUjLvK3XiyZTciyh9+YVsj7cgbgkairLd0aKQ==",
+  "sha256": "5b6f691aa9a1a88ff07f6bd9d2cc3cf46bedd2b85dce726e4adc2c44073bdccc",
+  "integrity": "sha512-u0MRgOz29sSpxOhusL6BwdCaWHvna5mP0By8U1Wc5i1hO0WX/9shDeypP066lpbEskQmR07ytG1Z11BJPeyIAA==",
   "build": [
     "git archive <commit> | tar -x",
     "npm install --ignore-scripts (repo root, with its vendored SDK and bridge-core tarballs)",
@@ -16,5 +16,5 @@
     "npm pack --ignore-scripts"
   ],
   "verified": "NB2 v1.1 authenticated UTB tip, canonical child-bound Mint receipts, and durable certification. The SDK and bridge-core tarballs match the demo copies byte for byte.",
-  "notes": "native-bridge-plugins #93: typed retryable RPC errors, jittered backoff, transportRetry, WalletError PolicyRequired. Ships with the generation whose manifest names this commit."
+  "notes": "native-bridge-plugins fix/redeem-needs-archive (PR head, re-pin to the merge commit of main once merged): needs-archive only on a node's own pruned answer, never after a count of reads; a payout not certified yet stays pending; needs-archive names the missing component. Ships with the generation whose manifest names this commit."
 }
