@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/ristik/native-bridge-plugins.git",
-  "commit": "a3d33c3dca52a10e69c5bdb34a75320586641d10",
-  "branch": "fix/redeem-vanished-payout",
+  "commit": "06e224c744dce984753a0b5e616078e923ca8566",
+  "branch": "main",
   "directory": "packages/native-bridge-plugin",
   "name": "@unicitylabs/native-bridge-plugin",
   "version": "0.1.0",
@@ -16,7 +16,7 @@
     "npm pack --ignore-scripts"
   ],
   "verified": "NB2 v1.1 authenticated UTB tip, canonical child-bound Mint receipts, and durable certification. The SDK and bridge-core tarballs match the demo copies byte for byte.",
-  "notes": "native-bridge-plugins #95 (PR head; re-pin to its merge commit on main once merged): a seen payout or failed receipt that left the chain is offered again as the identical bytes (own send or continuation settle packet) or reported as vanished (another party's payment), CERTIFICATION_DEPTH past it; on top of #94 (b752c2a1): needs-archive only on a node's own pruned answer. Ships with the generation whose manifest names this commit.",
+  "notes": "native-bridge-plugins #95 (merged as 06e224c7): a seen payout or failed receipt that left the chain is offered again as the identical bytes (own send or continuation settle packet) or reported as vanished (another party's payment), CERTIFICATION_DEPTH past it; on top of #94 (b752c2a1): needs-archive only on a node's own pruned answer. Ships with the generation whose manifest names this commit.",
   "toolchain": {
     "node": "24.22.3",
     "npm": "11.21.2",
