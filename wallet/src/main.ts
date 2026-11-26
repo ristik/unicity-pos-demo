@@ -12,7 +12,7 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import { secp256k1 } from '@noble/curves/secp256k1.js';
 
 import { abs, COMPATIBLE_RELEASE_PLUGIN, DEFAULTS, loadSettings, pinOverridden, RELEASE_DIGEST, saveSettings, type Settings } from './config.js';
-import { isAddress } from './evm.js';
+import { Evm, isAddress } from './evm.js';
 import * as faucet from './faucet.js';
 import { forgeRelabelled, forgeUnknownKeys, sealTable, verdict } from './forge.js';
 import { acceptToken, announceHandoff, Handoff, type Peer } from './handoff.js';
@@ -24,7 +24,7 @@ import { READ_ONLY_OK, VALUE_STEPS, importBlock, OperationGuard, refusal } from 
 import { burnerFrom, loadExisting, loadOrCreateDurable, parseBackup, replaceKeyDurable, toMnemonic, type Burner } from './keys.js';
 import * as nb2 from './nb2.js';
 import { checkReleaseDigest, checkRevision, fetchRelease, type Published } from './release.js';
-import { encodeReturnBackup, readPayerPolicy } from './recovery.js';
+import { defaultPayerPolicy, encodeReturnBackup, readPayerPolicy } from './recovery.js';
 import { chooseReturnBackup, type SaveReturnBackup } from './return-backup.js';
 import { load, loadJson, PROFILE, remove, save, saveJson } from './store.js';
 import { getToken, initTokens, listTokens, patchToken, putToken, putTokens, tokensOpen, type Phase, type TokenRecord } from './tokens.js';
@@ -105,7 +105,9 @@ async function step(key: string, fn: () => Promise<string | void>, prepare?: () 
     const msg = await fn();
     status.set(key, { ok: true, text: msg ?? 'done' });
   } catch (e) {
-    status.set(key, reportStepFailure(e));
+    // the plug-in decides when a policy is required: only that refusal is turned into a pointer to the defaults button
+    status.set(key, reportStepFailure(e instanceof Error && e.name === 'Nb2Error' && e.message.includes('explicit payer limits are required')
+      ? new Error('This return needs a payer policy. Open "Return payer policy" and paste explicit ceilings, or click "use testnet defaults" and check them, then run again.') : e));
   } finally {
     end(t);
     traces.set(key, t);
@@ -265,6 +267,19 @@ const policyInput = h('textarea', { id: 'return-policy', rows: '5', 'aria-label'
 remove('return.policy');
 const coldRoute = h('input', { type: 'checkbox', 'aria-label': 'use continuation if ordinary no longer fits' });
 const policy = () => policyInput.value.trim() ? readPayerPolicy(policyInput.value) : undefined;
+/** Fill the textarea from the connected deployment's release limits and the gateway's current gas price. The owner reviews it before use. */
+async function fillDefaultPolicy(): Promise<void> {
+  const s = sess();
+  const lim = (k: string): bigint | undefined => {
+    const v = published?.release.limits?.[k]?.value;
+    try { return typeof v === 'string' || typeof v === 'number' ? BigInt(v) : undefined; } catch { return undefined; }
+  };
+  let gasPrice: bigint | undefined;
+  try { gasPrice = BigInt(await new Evm(abs(settings.rpc), s.bridge.cfg.chainId).rpc<string>('eth_gasPrice')); } catch { /* reference price */ }
+  policyInput.value = defaultPayerPolicy({ gas: s.pins.userGasLimit, signedBytes: lim('maxEncodedTxBytes') ?? s.pins.maxEncodedTxBytes,
+    calldataBytes: lim('calldataBytes'), gasPrice });
+  fact('payer policy', 'testnet defaults filled in: review the ceilings before running');
+}
 
 const peerSelect = h('select', { 'aria-label': 'receiving tab' });
 
@@ -750,10 +765,12 @@ function flowCard(): HTMLElement {
       ...toks.map((x) => h('option', { value: x.id, selected: x.id === currentId }, `${x.id.startsWith('rx-') ? 'received' : x.parent ? `part ${x.id.endsWith('.back') ? 'back' : 'keep'} of ${x.parent}` : `deposit ${x.id.slice(1)}`} · ${fmtUnits(BigInt(x.amountWei))} UCT · ${x.phase === 'received' ? 'received, not verified' : x.phase}${x.pending ? ' · transfer pending' : ''}${x.burning ? ' · burn in progress' : ''}`)))
     : h('span', { class: 'muted' }, 'none yet: deposit some UCT');
   peerSelect.replaceChildren(...[...peers.values()].map((p) => h('option', { value: p.profile }, `tab ${p.profile.toUpperCase()}`)));
-  if (!peers.size) peerSelect.append(h('option', { value: '' }, 'no other tab'));
+  // The handoff is opt-in in every tab (see enableHandoff), so say which tab still has to opt in.
+  if (!peers.size) peerSelect.append(h('option', { value: '' }, handoff ? 'no other tab yet: click "take part in handoff" in the other tab' : 'click "take part in handoff" here and in the other tab'));
   return card('Asset flow',
     h('div', { class: 'row' }, h('span', {}, 'token: '), picker, t?.tokenId ? mono(t.tokenId) : ''),
-    h('details', {}, h('summary', {}, 'Return payer policy'), h('p', { class: 'what' }, 'Set explicit gas, byte, nonce and fee ceilings, plus optional public archive origins or /archive-rpc. The policy stays in this tab until reload. Use one payer for the full return.'), policyInput),
+    h('details', {}, h('summary', {}, 'Return payer policy'), h('p', { class: 'what' }, 'Set explicit gas, byte, nonce and fee ceilings, plus optional public archive origins or /archive-rpc. The policy stays in this tab until reload. Use one payer for the full return. Plan return, Burn and Redeem need it.'),
+      policyInput, h('div', { class: 'row' }, h('button', { disabled: !session, onclick: () => void fillDefaultPolicy().then(render, (e) => fact('error', String(e))) }, 'use testnet defaults'))),
     t?.returnId && (t.eta || t.burning) ? h('button', { disabled: !!busy || !ready, onclick: () => void step('return-backup', async () => {
       const s = sess();
       const rec = need(await nb2.returnRecord(s, t.returnId!), 'No signed return to back up');
