@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { REFERENCE_POLICY, defaultPayerPolicy, readPayerPolicy } from '../src/recovery.js';
+import { REFERENCE_POLICY, defaultPayerPolicy, prefillPolicy, readPayerPolicy } from '../src/recovery.js';
 
 test('default payer policy follows the release limits and the gateway gas price', () => {
   const p = readPayerPolicy(defaultPayerPolicy({ gas: 30_000_000n, signedBytes: 131_072n, calldataBytes: 65_536n, gasPrice: 5_000_000n }));
@@ -38,4 +38,20 @@ test('default payer policy keeps the fee budget above several maximal transactio
   assert.equal(p.maxTransactionFee, 24_000_000n * 50_000_000_000n);
   assert.ok(p.feeBudget >= p.maxTransactionFee!);
   assert.equal(p.feeBudget, p.maxTransactionFee! * 20n);
+});
+
+test('prefill fills an empty box and never touches what the user typed', () => {
+  const next = defaultPayerPolicy({ gasPrice: 2_000_000n });
+  assert.equal(prefillPolicy('', null, next), next);
+  assert.equal(prefillPolicy('  \n', null, next), next);
+  assert.equal(prefillPolicy('{"gas":"1"}', null, next), undefined);
+  assert.equal(prefillPolicy('{"gas":"1"}', '{"gas":"2"}', next), undefined);
+});
+
+test('an unpriced prefill is replaced once a price is read, unless the user edited it', () => {
+  const unpriced = defaultPayerPolicy({});
+  const priced = defaultPayerPolicy({ gasPrice: 3_000_000n });
+  assert.equal(prefillPolicy(unpriced, unpriced, priced), priced);
+  assert.equal(prefillPolicy(`${unpriced} `, unpriced, priced), undefined);
+  assert.equal(prefillPolicy(priced, null, unpriced), undefined);
 });
