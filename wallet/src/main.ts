@@ -480,13 +480,16 @@ const STEPS: StepDef[] = [
         await patchToken(t.id, { returnProgress: text });
         return text;
       }
-      if (r.state === 'needs-archive') throw new Error(`Need an archive proof for 0x${hex(r.txHash)}. Add an archive RPC to the payer policy and retry.`);
+      // Only a node's own answer that it no longer holds part of the proof gets here; a payout not certified yet stays 'pending'.
+      if (r.state === 'needs-archive') {
+        throw new Error(`The RPC no longer serves ${r.missing ?? 'part of the proof'} for 0x${hex(r.txHash)}, so the payment cannot be proven from it. Run Redeem again later; if this persists, add an archive RPC that holds that block to the payer policy.`);
+      }
       if (r.state === 'route-blocked') throw new Error(`The ${r.route} route still has a transaction to reconcile: 0x${hex(r.txHash)}`);
       if (r.state === 'not-paid' && r.lastFailure) {
         const rule = r.lastFailure.error;
         throw new Error(`Mined refusal: ${rule?.rule ?? 'unknown'}${rule?.inner ? ` (${rule.inner.rule})` : ''}`);
       }
-      if (r.state !== 'paid') throw new Error(r.state === 'pending' ? 'Payment is pending. Run again to reconcile it.' : 'The burn is intact. Check the payer policy and retry.');
+      if (r.state !== 'paid') throw new Error(r.state === 'pending' ? `Payment 0x${hex(r.txHash)} is sent and not certified yet (waiting to be mined or for its block's certificate). Run Redeem again to reconcile it.` : 'The burn is intact. Check the payer policy and retry.');
       await patchToken(t.id, { phase: 'redeemed', returnProgress: undefined, redeemTx: `0x${hex(r.txHash)}` });
       await refreshBalances();
       return `paid ${fmtUnits(BigInt(t.amountWei))} UCT to ${t.recipient?.slice(0, 10)}… in block ${r.blockNumber}`;
