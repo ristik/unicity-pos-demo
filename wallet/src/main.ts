@@ -105,9 +105,8 @@ async function step(key: string, fn: () => Promise<string | void>, prepare?: () 
     const msg = await fn();
     status.set(key, { ok: true, text: msg ?? 'done' });
   } catch (e) {
-    // the plug-in decides when a policy is required: only that refusal is turned into a pointer to the defaults button
-    status.set(key, reportStepFailure(e instanceof Error && e.name === 'Nb2Error' && e.message.includes('explicit payer limits are required')
-      ? new Error('This return needs a payer policy. Open "Return payer policy" and paste explicit ceilings, or click "reset to testnet defaults" and check them, then run again.') : e));
+    // a missing policy (PolicyRequired) points to the defaults button; a retryable RPC error says to wait and run again
+    status.set(key, reportStepFailure(nb2.stepError(e)));
   } finally {
     end(t);
     traces.set(key, t);

@@ -15,7 +15,7 @@
 import { sha256 } from '@noble/hashes/sha2.js';
 import { keccak_256 } from '@noble/hashes/sha3.js';
 import {
-  AmbiguousBroadcast, HttpJsonRpc, LocalKeySigner, NativeBridgeV2, Nb2Error, WalletError, appendTransfer, certifyChecked, deriveBridgeKey, evidenceOf,
+  AmbiguousBroadcast, HttpJsonRpc, LocalKeySigner, NativeBridgeV2, Nb2Error, RpcError, WalletError, appendTransfer, certifyChecked, deriveBridgeKey, evidenceOf,
   freshMask, localOwner, transferRequest,
   type Aggregator, type DepositPlan, type DeploymentPins, type GasModel, type IntentsRecord, type JournalStore, type JsonRpc, type OwnerSigner, type ReconcileResult,
   type ReturnPlan, type ReturnRecord,
@@ -118,7 +118,7 @@ const tagged = (s: string, secret: Uint8Array): Uint8Array => sha256(new Uint8Ar
  * refusal (`BadDeployment`) means the manifest and the node are not the same deployment, and nothing is sent.
  */
 export async function openSession(a: OpenArgs): Promise<Session> {
-  const http = a.rpc ?? new HttpJsonRpc(abs(a.settings.rpc), { retries: 20, timeoutMs: 120_000, fetch: (i, init) => globalThis.fetch(i, init) });
+  const http = a.rpc ?? new HttpJsonRpc(abs(a.settings.rpc), { retries: 2, maxWaitMs: 5_000, timeoutMs: 120_000, fetch: (i, init) => globalThis.fetch(i, init) });
   const aggregator = a.aggregator ?? new GatewayAggregator(abs(a.settings.aggregator));
   let heldTrust = a.trust;
   const refreshTrust = async (): Promise<TrustInput | void> => {
@@ -172,11 +172,42 @@ export const RETRYABLE = ['CompanionUnknown', 'Unconfirmed', 'NotPending', 'NoEn
 /** The ones a step that reads chain evidence waits out (a certificate not served yet, a trust history to extend). */
 export const NOT_YET = ['CompanionUnknown', 'Unconfirmed', 'NoEntryForEpoch', 'TrustSyncRequired'];
 
-/** F again while it refuses with a reason in WHICH, up to TRIES times; NOTE is told the first time and every tenth. */
-export async function retry<T>(f: () => Promise<T>, note: (reason: string) => void = () => undefined, tries = 120, ms = 2_000, which = RETRYABLE): Promise<T> {
+export interface TransportRetryOptions { budgetMs?: number; baseMs?: number; capMs?: number; sleep?: (ms: number) => Promise<void>; random?: () => number }
+
+/**
+ * F again while it fails with a retryable transport error (HTTP 429/502/503/504, a network failure), with exponential backoff and jitter,
+ * for about 100 s in all. The plug-in's transport retries only briefly (2 retries, 5 s: the old `retries: 20` is now capped); this is the one
+ * outer loop, and it is only for idempotent reads and polls (port of wallet/core.ts transportRetry). Anything else, and a retryable error
+ * after the budget, is thrown at once.
+ */
+export async function transportRetry<T>(f: () => Promise<T>, note: (reason: string) => void = () => undefined, o: TransportRetryOptions = {}): Promise<T> {
+  const nap = o.sleep ?? sleep;
+  const random = o.random ?? Math.random;
+  const budget = o.budgetMs ?? 100_000;
+  let waited = 0;
   for (let i = 0; ; i++) {
     try {
       return await f();
+    } catch (e) {
+      if (!(e instanceof RpcError && e.retryable)) throw e;
+      const step = Math.min(o.capMs ?? 20_000, (o.baseMs ?? 2_000) * 2 ** i);
+      const delay = Math.max(e.retryAfterMs ?? 0, Math.round(step / 2 + random() * step / 2));
+      if (waited + delay > budget) throw e;
+      if (i % 5 === 0) note('the public RPC is rate-limiting, waiting');
+      waited += delay;
+      await nap(delay);
+    }
+  }
+}
+
+/**
+ * F again while it refuses with a reason in WHICH, up to TRIES times; NOTE is told the first time and every tenth. A retryable transport error
+ * is waited out separately (`transportRetry`, its own budget) unless TRANSPORT is false, and never counts as a refusal.
+ */
+export async function retry<T>(f: () => Promise<T>, note: (reason: string) => void = () => undefined, tries = 120, ms = 2_000, which = RETRYABLE, transport = true): Promise<T> {
+  for (let i = 0; ; i++) {
+    try {
+      return await (transport ? transportRetry(f, note) : f());
     } catch (e) {
       const reason = reasonOf(e);
       if (i >= tries || !which.includes(reason)) throw e;
@@ -184,6 +215,15 @@ export async function retry<T>(f: () => Promise<T>, note: (reason: string) => vo
       await sleep(ms);
     }
   }
+}
+
+/** What a step failure shows: a missing payer policy points to the defaults button, a retryable RPC error says to wait. Anything else is unchanged. */
+export function stepError(e: unknown): unknown {
+  if (e instanceof WalletError && e.reason === 'PolicyRequired' || e instanceof Error && e.message.includes('explicit payer limits are required')) {
+    return new Error('This return needs a payer policy. Open "Return payer policy" and paste explicit ceilings, or click "reset to testnet defaults" and check them, then run again.');
+  }
+  if (e instanceof RpcError && e.retryable) return new Error('the public RPC is rate-limiting; wait a few seconds and run again');
+  return e;
 }
 
 /**
@@ -290,7 +330,7 @@ export function recoveryWallet(s: Session, store: IdbKv) {
 
 export async function planReturn(s: Session, token: Uint8Array, recipient: Uint8Array, note?: (reason: string) => void, store?: IdbKv, policy?: PayerPolicy): Promise<ReturnPlan> {
   const admission = store && walletAdmission(recoveryWallet(s, store), policy);
-  const plan = await retry(() => s.bridge.planReturn(token, recipient, s.signer.address, { admission }), note, 30, 2_000, NOT_YET);
+  const plan = await retry(() => s.bridge.planReturn(token, recipient, s.signer.address, { admission }), note, 30, 2_000, NOT_YET, false);
   describePlan(s, plan);
   fact('return id', `0x${hex(plan.returnId)}`);
   return plan;
@@ -300,7 +340,7 @@ export async function planReturn(s: Session, token: Uint8Array, recipient: Uint8
 export async function burn(s: Session, returnId: Uint8Array, store: IdbKv, saveBackup: SaveReturnBackup, note?: (reason: string) => void, policy?: PayerPolicy): Promise<{ burned: Uint8Array; eta: Uint8Array; evidenceBytes: number }> {
   const recovery = recoveryWallet(s, store);
   const rec = await returnRecord(s, `0x${hex(returnId)}`);
-  const b = await retry(() => s.bridge.burn(returnId, s.owner, walletAdmission(recovery, policy, saveBackup), rec ? unhex(rec.recipient) : undefined), note);
+  const b = await retry(() => s.bridge.burn(returnId, s.owner, walletAdmission(recovery, policy, saveBackup), rec ? unhex(rec.recipient) : undefined), note, 120, 2_000, RETRYABLE, false);
   const committed = await returnRecord(s, `0x${hex(returnId)}`);
   if (committed) await retainTerminal(recovery, committed);
   const evidenceBytes = evidenceOf(b.burned).length;
@@ -320,7 +360,7 @@ export async function redeem(s: Session, returnId: Uint8Array, note: (m: string)
   }
   if (rec && wallet && (rec.recovery || cold)) {
     if (!policy) throw new Error('Enter the return payer policy before continuing');
-    return retry(() => recoverStep(wallet, rec, policy), note, 30, 2_000, []);
+    return retry(() => recoverStep(wallet, rec, policy), note, 30, 2_000, [], false);
   }
   const deadline = performance.now() + REGISTRY_LAG_MS;
   let r: ReconcileResult;
@@ -332,8 +372,7 @@ export async function redeem(s: Session, returnId: Uint8Array, note: (m: string)
       if (performance.now() >= deadline) throw refusal;
     }
     try {
-      r = await retry(() => rec && wallet ? redeemOrdinary(wallet, rec, policy) : s.bridge.submitRedeem(returnId, s.signer),
-        note, 30, 2_000, []);
+      r = await transportRetry(() => rec && wallet ? redeemOrdinary(wallet, rec, policy) : s.bridge.submitRedeem(returnId, s.signer), note);
       break;
     } catch (e) {
       if (!isRegistryLag(e)) throw e;
@@ -343,7 +382,8 @@ export async function redeem(s: Session, returnId: Uint8Array, note: (m: string)
   }
   for (let i = 0; r.state === 'pending' && i < polls; i++) {
     await sleep(pollMs);
-    r = rec && wallet ? await pollOrdinaryPayout(wallet, rec, r.txHash, policy) : await s.bridge.reconcile(returnId);
+    const txHash = r.txHash;
+    r = await transportRetry(() => rec && wallet ? pollOrdinaryPayout(wallet, rec, txHash, policy) : s.bridge.reconcile(returnId), note);
   }
   if (r.state === 'paid') {
     fact('paid in block', r.blockNumber.toString());
