@@ -360,7 +360,7 @@ export async function redeem(s: Session, returnId: Uint8Array, note: (m: string)
   }
   if (rec && wallet && (rec.recovery || cold)) {
     if (!policy) throw new Error('Enter the return payer policy before continuing');
-    return retry(() => recoverStep(wallet, rec, policy), note, 30, 2_000, []);
+    return retry(() => recoverStep(wallet, rec, policy), note, 30, 2_000, [], false);
   }
   const deadline = performance.now() + REGISTRY_LAG_MS;
   let r: ReconcileResult;
