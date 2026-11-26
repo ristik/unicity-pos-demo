@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/ristik/native-bridge-plugins.git",
-  "commit": "89f6d053abcbdae22589c94920b2e0d61b5c9dae",
+  "commit": "ca96a2982aa7479238d605ee72779cf59d35509e",
   "branch": "fix/sane-head-scan",
   "directory": "packages/native-bridge-plugin",
   "name": "@unicitylabs/native-bridge-plugin",
