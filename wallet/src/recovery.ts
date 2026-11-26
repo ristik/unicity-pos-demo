@@ -365,10 +365,12 @@ export async function reconcileReturn(w: Wallet, rec: ReturnRecord, policy?: Pay
   resubmit = true): Promise<{ record: ReturnRecord; result: ReconcileResult }> {
   const archive = policy ? readers(w, policy) : [w.bridge.evm];
   const journal = await loadRecovery(w, rec);
-  const settlements = [...(journal?.superseded ?? []), ...(journal?.replacedSettlements ?? [])].map((raw) => decodeSignedTx(bytes(raw)))
-    .filter((tx) => eq(tx.request.to, w.bridge.cfg.vault)).map((tx) => tx.hash);
-  if (journal?.pending?.cut.kind === 'settle') settlements.push(decodeSignedTx(bytes(journal.pending.raw)).hash);
-  const evidence: ReturnEvidence = { settlements, pending: { recovery: recoveryEmitter(w) }, readOnly: !resubmit };
+  // this wallet's own settlement packets: their hashes are lookup hints, their bytes mark them as ours (never another party's payment)
+  const own = [...(journal?.superseded ?? []), ...(journal?.replacedSettlements ?? [])].map((raw) => bytes(raw))
+    .filter((raw) => eq(decodeSignedTx(raw).request.to, w.bridge.cfg.vault));
+  if (journal?.pending?.cut.kind === 'settle') own.push(bytes(journal.pending.raw));
+  const settlements = own.map((raw) => decodeSignedTx(raw).hash);
+  const evidence: ReturnEvidence = { settlements, own, pending: { recovery: recoveryEmitter(w) }, readOnly: !resubmit };
   const result = await w.bridge.reconcile(bytes(rec.returnId, 32), archive, evidence);
   const record = (await w.bridge.journal.ret(rec.returnId))!;
   if (result.state === 'paid') await retainPayment(w, record, hx(result.txHash));
