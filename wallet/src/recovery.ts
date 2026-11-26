@@ -85,6 +85,16 @@ export function defaultPayerPolicy(release: { gas?: bigint; signedBytes?: number
   }, null, 2);
 }
 
+/**
+ * The text the policy box should hold after a prefill attempt, or undefined to leave it alone. An empty box is filled; so is a box still
+ * holding the wallet's own earlier unpriced (reference-constant) fill, so a later successful gas price read replaces it. Anything the
+ * user typed or pasted is never touched.
+ */
+export function prefillPolicy(current: string, unpriced: string | null, next: string): string | undefined {
+  if (current.trim() === '' || (unpriced !== null && current === unpriced)) return next;
+  return undefined;
+}
+
 /** Authenticated archives belong behind a fixed same-origin route. A direct reader must be public. */
 function publicArchive(input: string): string {
   if (input === '/archive-rpc') return input;
