@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/ristik/native-bridge-plugins.git",
-  "commit": "c012887fc372d4718e304370ad4537438b478b85",
-  "branch": "fix/vanished-claim-horizon",
+  "commit": "a88e0d5b5f6e965ca9d7ae6efc5c9aa0b9aa193a",
+  "branch": "main",
   "directory": "packages/native-bridge-plugin",
   "name": "@unicitylabs/native-bridge-plugin",
   "version": "0.1.0",
@@ -16,7 +16,7 @@
     "npm pack --ignore-scripts"
   ],
   "verified": "NB2 v1.1 authenticated UTB tip, canonical child-bound Mint receipts, and durable certification. The SDK and bridge-core tarballs match the demo copies byte for byte.",
-  "notes": "native-bridge-plugins #96 (PR head; re-pin to its merge commit on main once merged): an unproven peer Paid claim no reader holds canonically is dropped VANISHED_CLAIM_HORIZON (64) blocks after the return first saw one (peerClaimSince only lowered, to the lowest reader head), and the own payout proceeds (the vault's AlreadyPaid refuses a double payment); on top of #95 (06e224c7) and #94 (b752c2a1). Ships with the generation whose manifest names this commit.",
+  "notes": "native-bridge-plugins #96 (merged as a88e0d5b): an unproven peer Paid claim no reader holds canonically is dropped VANISHED_CLAIM_HORIZON (64) blocks after the return first saw one (peerClaimSince only lowered, to the lowest reader head), and the own payout proceeds (the vault's AlreadyPaid refuses a double payment); on top of #95 (06e224c7) and #94 (b752c2a1). Ships with the generation whose manifest names this commit.",
   "toolchain": {
     "node": "24.22.3",
     "npm": "11.21.2",
