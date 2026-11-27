@@ -19,11 +19,10 @@ style: |
 
 ### Enshrined EVM · stake-elected validators · NB2 v1.1 · trust-base history
 
-Demo for public testnet `tn-public-20261122`
+Demonstrated on public testnet `tn-public-20261127b` (chain ID `496562270`).
 
 <!-- Speaker: 45 min. About 15 min of slides, about 20 min demo, 10 min Q&A.
-The public testnet starts with four validators. The fifth join and operator exit were tested in private rehearsals.
-Check the release and rehearsal status before presenting the live flow. -->
+Check the live network and release manifest before presenting. -->
 
 ---
 
@@ -34,7 +33,7 @@ Check the release and rehearsal status before presenting the live flow. -->
 3. **PoS demo**: the committee, stakes and quorum, live. A new validator joins from a container. The election **selects it by stake**, and the validator **publishes its own proof** and verifies activation with its local root. An old-epoch token **still verifies**. A forged one is rejected.
 4. **How it works underneath**: elections, slashing, governance, the bridge. Then PoA, the intermediate mode, and what's still left to do.
 
-Everything in the assets demo runs in a browser: no install, a burner key, public endpoints only.
+The assets demo runs in a browser with zero configuration, using a burner key and public endpoints.
 
 ---
 
@@ -85,13 +84,13 @@ the stack · proof of stake · governance · bridge · tested limits · maturity
 
 | | |
 |---|---|
-| Generation | `tn-public-20261122` · PoS on ValidatorRegistry |
-| Validators | **4 at genesis**. The fifth join was rehearsed privately. The PoS profile supports up to **16** ordered seats. |
+| Release | [Network API](https://pos.staging.unicity.network/api/network) · [Release manifest](https://pos.staging.unicity.network/release/manifest.json) |
+| Validators | **4 at genesis** · **16**-seat PoS limit |
 | Weight | `⌊bonded principal / 100 UCT⌋` |
-| Elections | the boundary requires both round and UC time thresholds |
-| Governance | FoundationMultisig 3-of-5, delay 2,000 rounds **and** 3,600 s |
-| EVM block interval | target ≈ 10 s (configurable, delay-only) |
-| Reference hardware | 6c/12t, 64 GB, 2 × 1 TB NVMe |
+| Elections | round **and** UC time thresholds |
+| Governance | 3-of-5 · 2,000 rounds **and** 3,600 s |
+| Block target | ≈ 10 s (delay-only) |
+| Hardware | 6c/12t, 64 GB, 2 × 1 TB NVMe |
 
 </div>
 <div>
@@ -103,7 +102,7 @@ the stack · proof of stake · governance · bridge · tested limits · maturity
 | `GET /api/v1/trustbases` | UTB history (CBOR) |
 | `/faucet/` | hCaptcha faucet |
 | `/demo/`, `/demo/pos.html` | wallet, PoS visualizer |
-| `/release/` | NB2 v1.1 manifest, pinned UTB history and moving B1 checkpoint |
+| `/release/` | NB2 manifest, pinned UTB, B1 checkpoint |
 
 </div>
 </div>
@@ -187,13 +186,8 @@ Forks keep `main` as the upstream-sync branch. UTB v2 is merged upstream (bft-go
 - **Weight** = `⌊principal / 100 UCT⌋` per bonded lot. A lot is immutable once bonded.
 - **When:** at the cadence, every N rounds **and** T seconds, both must pass.
 - **Who:** deterministic greedy selection by weight among eligible identities: registered, bonded ≥ the minimum, EVM key bound, not excluded, not retiring.
-- **Churn bounds**, judged against the incumbents:
-  - turnover < 1/3;
-  - weight distance within the bound;
-  - more than 2/3 overlap of both committees.
-
-  If no candidate passes, the incumbents continue.
-- **Recovery slate K:** the exact incumbents always ship with candidate J. If J can't acknowledge, K is installed, so an election can never strand the network.
+- **Churn bounds:** turnover < 1/3, weight distance within the bound and > 2/3 overlap of both committees. If no candidate passes, the incumbents continue.
+- **Recovery slate K:** the backed slate contains the exact incumbents. If candidate J fails to acknowledge, the roots can install K.
 - **Weighted quorum end to end:** root votes `⌊2W/3⌋+1`, EVM certificates `⌊W/2⌋+1`, and the same arithmetic in the B1 precompiles and the SDKs.
 - **Rewards:** RewardPool credits members per committed interval, in proportion to weight, from a funded pool. Nothing is minted.
 
@@ -207,32 +201,29 @@ Forks keep `main` as the upstream-sync branch. UTB v2 is merged upstream (bft-go
 |---|---|---|---|
 | 1. keys | — | `ubft validator init` | one key per service: root, EVM, ureth devp2p, operator account |
 | 2. register | — | `StakeCustody.register(rootKey, pop, withdrawal)` | never-reused `StakingID` = registry id; separate owner/withdrawal and root/EVM roles |
-| 3. bond | deposit | `StakeCustody.bond(id)` ≥ 100 UCT | an immutable lot; weight counts from the next election |
-| 4. bind | — | `ElectionPolicy.admitDelegation(...)` | binds the EVM key and operator payee (not stake delegation) |
+| 3. bind | — | `ElectionPolicy.admitDelegation(...)` | binds the EVM key and operator payee |
+| 4. bond | deposit | `StakeCustody.bond(id)` ≥ 100 UCT | an immutable lot that counts from the next election |
 | 5. activation | activation | `ubft validator pos-publish --own-proof` | publish the possession proof → handoff and **new UTB entry** → verify the activated root and shard epochs, then enroll the authority |
 | 6. rotate | — | `ubft validator rotate` | new node keys or payee, effective at the next boundary |
 | 7. exit | voluntary exit | `requestRetirement(id)` | excluded at the next election; leaves at that boundary |
 | 8. withdraw | withdraw | `mature` → `claim` | after holds and the evidence window, the principal goes to the withdrawal address |
 
-`ubft validator apply` registers, bonds, and binds the keys. Publish the assignment proof, then enroll the authority for the activated epochs. Use `validator exit` to request retirement and `validator claim` after the bond matures.
+One `ubft validator apply` run registers the identity and admits the delegation before the first bond (#1323). Members finalize in rank order. The five-member test went from five finalization submissions with four reverts to one submission with zero reverts.
 
 ---
 
-## PoS: slashing, and what's not implemented
+## PoS: slashing and parking
 
 **Only one slashing case:** a root key signs two **distinct** votes for the same `(epoch, round)`.
 - The penalty is 1% of exposed principal (lifetime cap 5% per lot), with a 10% reporter bounty. It goes to treasury: slashing transfers, never burns.
 - The offender is always **excluded** from future elections.
 - A slash never edits the active trust base, and progress never depends on removing an offender.
 
-No slashing for duplicate or re-encoded statements, different rounds, or absence from signer sets.
+**Parking** lasts `2 × LIFETIME` and leaves the member's stake and rights intact, with no slash.
+- An elected non-incumbent that misses its handoff proof is parked after expiry (#1303).
+- An incumbent is parked when a quorum of the old committee's root weight certifies its miss (#1319).
 
-**Not implemented (prototype economics):**
-- delegated stake;
-- downtime or absence slashing;
-- jailing;
-- a forced-inclusion inbox for evidence;
-- EVM-domain evidence (it always reverts).
+**Outside the prototype:** delegated stake, downtime slashing, jailing and a forced-inclusion inbox for evidence. EVM-domain evidence always reverts.
 
 ---
 
@@ -283,16 +274,16 @@ Same registry, same handoff, same nodes. Only the **election module** differs: *
 | | PoS | PoA |
 |---|---|---|
 | Who decides membership | stake (election) | Foundation multisig: `Admit`, `ConfirmExit`, `ForceRemove` |
-| Join | register + bond + bind | `ubft validator apply` → `Admit` + delay (2,000 rounds and 3,600 s) |
+| Join | register, delegate, bond in one `apply` | `ubft validator apply` → `Admit` + delay (2,000 rounds and 3,600 s) |
 | Exit / withdraw | `requestRetirement` → `mature` → `claim` | `ubft validator exit` → `ConfirmExit`; nothing to withdraw |
 | Weights | `⌊principal/100 UCT⌋` | 1 each |
 
-- **States:** None → Applied → Admitted → Joining → Active → ExitRequested → Removing → Leaving → Exited. **Parked** is a non-punitive retry for a joiner that wasn't ready: it returns after `PARK_PERIOD` or on `rejoin`.
-- **When an election is due:** the records are caught up, no output is open, the minimum epoch gap has passed, and there is work: a joiner, a removal, a staged key binding or a force-remove.
-- **Composition:** a bounded deterministic search over at most 6 changes (64 trials) under the same churn rules as PoS: turnover < 1/3, distance bound, > 2/3 overlap. An overdue, feasible force-remove is mandatory. With equal weights a pure removal needs N ≥ 5, so the operational default is N ≥ 5.
-- **Tooling:** `ubft validator init / doctor / apply / status / rotate / exit / rejoin`; `ubft governance propose / sign / aggregate / execute / list` for the multisig signers (offline signing).
-- **Measured (2026-11-19):** a joiner applied → admitted after both delays → its shard node restored from an incumbent's archive in 74 s → every root derived the same intent → handoff → epoch 2 with committee `[1, 2, 3, 4, 5]`. 29/29 checks; no operator action after `apply`.
-- **Why it exists:** it gives a governed launch and testnet while PoS economics mature. Moving a live PoA network to PoS is one pointer switch, <span class="plan">planned as VT-17</span>.
+- **States:** None → Applied → Admitted → Joining → Active → ExitRequested → Removing → Leaving → Exited. A parked joiner can retry after `PARK_PERIOD` or with `rejoin`.
+- **Election:** records are current, no output is open, the epoch gap has passed and a join, removal, key binding or force-remove is pending.
+- **Composition:** PoS churn rules apply. The search tests up to 6 changes (64 trials). A feasible overdue force-remove is mandatory. An equal-weight removal needs at least 5 members.
+- **Tooling:** `ubft validator` for operators and `ubft governance` for the offline multisig signers.
+- **Measured (2026-11-19):** after admission, the joiner restored from an incumbent archive in 74 s. Handoff installed five members at epoch 2. All 29 checks passed with no operator action after `apply`.
+- **Transition to PoS:** one election module switch, <span class="plan">planned as VT-17</span>.
 
 ---
 
@@ -309,8 +300,8 @@ docker exec unicity-node ubft-validator join --yes
 docker exec unicity-node ubft-validator status
 ```
 
-- **Public P2P and permissionless handoff.** Each validator submits its own proof. Any validator can publish the result once all proofs are recorded. Each node verifies activation from its own synced root.
-- **Replace only the node, using the same volume.** If the authority exits, stop and contact maintainers if registered, bonded or unsure. If confirmed unregistered and unbonded with no unresolved submissions, initialize a fresh authority in a separate volume. [Handbook](https://github.com/ristik/bft-core/blob/integration/enshrined-evm/docs/operations/validator-handbook.md#authority-loss) · [#1286](https://github.com/ristik/bft-core/issues/1286)
+- **Public P2P and permissionless handoff.** Each validator submits its own proof. Members finalize and publish in rank order, with later ranks stepping in if needed. Each node verifies activation from its own synced root.
+- **Authority loss.** For a bonded PoS identity with a surviving root key, use `ubft-validator recover` (#1286). Confirm the registry binding first. The fresh authority verifies its staking pin against its own execution client before signing the delegation (#1328). [Recovery procedure](https://github.com/ristik/bft-core/blob/integration/enshrined-evm/docs/operations/validator-handbook.md#authority-loss)
 - **Operator resources.** The public release provides the image, verified seed and public peer lists. The handbook covers upgrades and retirement. [Demo commands](https://github.com/ristik/unicity-pos-demo/blob/main/demo/add-validator.md)
 
 ---
@@ -381,7 +372,7 @@ The burn side is final at once on both. The hard part is a weak verifier, and he
 | What | Result |
 |---|---|
 | **16 / 32 / 64 roots** | all controls pass: progress, rejoin, quorum-minus-one stall, resume (34–38 rounds/min) |
-| **128 roots** | "can pass, not reliably": 4/7 fresh runs. The stall at quorum−1 always holds; **resume** is what fails (#982 open). 81–94 % of CPU is secp256k1 verification; timeout traffic is O(n²) |
+| **128 roots** | Before the resume fix, 4/7 fresh runs passed. Stalling at quorum−1 held in every run. secp256k1 verification used 81–94% of CPU and timeout traffic was O(n²). [#982 closed](https://github.com/ristik/bft-core/issues/982). |
 | committee ceiling **16** | the #1215 PoS profile uses ordered seats and retains the exact historical bond lot for each seat |
 | PoS election hook (P85) | 5.4 M gas at 16 candidates → 64.6 M at 128 candidates / 32 elected |
 | registry election hook | ≈ 10.0 M gas per election inside a 97.9 M system envelope (measured, pinned at generation) |
@@ -419,15 +410,15 @@ The burn side is final at once on both. The hard part is a weak verifier, and he
 
 ## Maturity: where we are, and what's left
 
-| Area | Shipped or rehearsed | Next | Later |
+| Area | Merged or demonstrated | Next | Later |
 |---|---|---|---|
-| **PoS** | public VR/P85 with up to 16 ordered seats (#1215). The fifth validator joined in private rehearsal | — | production economics and audit |
-| **Registry & handoff** | VR, governance CLI, registry admission, handoff (roots + nodes), operator enrollment | — | live PoA → PoS switch on one network (VT-17) |
+| **PoS** | public VR/P85 (#1215). Fifth validator joined, exited and reclaimed its bond | — | production economics and audit |
+| **Registry & handoff** | backed recovery slate K (#1221). PoS and PoA recovery proven (#1226) | — | live PoA → PoS switch on one network (VT-17) |
 | **PoA (intermediate)** | PoaElection, multisig, `validator apply/exit/rejoin/rotate` | — | — |
-| **Live config & upgrades** | live fees (VT-06c), activation schedules (VT-07), aggregator and committee config | — | partition retirement (VT-18) |
-| **Operator tooling** | verified sync seed (VT-11), monitoring and alerts (VT-12), operator handbooks and rehearsal (VT-13) | — | recoverable key custody |
-| **NB2 v1.1** | public on `tn-public-20261122`. The HTTPS download channel selects the deployment and serves its moving B1 checkpoint (#1283). | real-value recovery qualification (#1269) | UTB-verifiable release binding (#1282), mint format (#1257) |
-| **Consensus** | weighted quorum, historical trust, silent-leader fix (#1210), durable proposal slot reservations (#1212) | — | 128-root resume (#982) |
+| **Live config & upgrades** | VR schedules forks (ureth #114, #115). Prague gate closed before activation (#1325) | — | partition retirement (VT-18) |
+| **Operator tooling** | verified seed. Signing authority checks its staking pin against its own execution client (#1222) | — | recoverable key custody |
+| **NB2 v1.1** | the HTTPS release selects the public UCT deployment and serves its moving B1 checkpoint (#1283) | real-value qualification in progress. T7 (#1269) and ERC20 (#1038) drafts in review | UTB-verifiable release binding (#1282), mint format (#1257) |
+| **Consensus** | weighted quorum, historical trust, silent-leader and slot fixes (#1210, #1212). #982 closed | — | — |
 
 **Not yet:** independent audit · evidence from more than one server and operator · a decentralized aggregator (central at launch) · migrations (a testnet reset is a new network).
 
@@ -439,6 +430,8 @@ The burn side is final at once on both. The hard part is a weak verifier, and he
 
 faucet → deposit → mint → split → verify transfer offline in tab B → burn → redeem
 
+The wallet prefills the payer policy and offers a backup download in Firefox. Redeem uses public RPC with raised rate limits and requires no archive.
+
 Continuation UI shows certified progress, gap advances and final payment when the claim needs them.
 
 ---
@@ -447,9 +440,9 @@ Continuation UI shows certified progress, gap advances and final payment when th
 
 # Demo 2: PoS
 
-`ubft-validator join --yes` → 100 UCT bond → next boundary → 4 → 5 validators
+One `ubft validator apply` run admits the delegation before the 100 UCT bond.
 
-The isolated rehearsal reached five confirmed members in **4m37s** over public P2P, including a node-container restart during the join.
+On the public testnet, the fifth validator synced from the epoch-1 seed across two root handoffs and entered the committee at the next stake election. It later exited and reclaimed its bond.
 
 The old committee signs the new UTB entry. Show a verified EVM UC carrying the fifth root’s signature.
 
